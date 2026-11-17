@@ -51,8 +51,10 @@ No training has happened. The reason to hold off is data, not code: with Prelude
 
 Configure site settings once: copy [../leonardo.env.example](../leonardo.env.example) to `leonardo.env` (git-ignored), fill in
 `OELLM_ACCOUNT`, `OELLM_WORK`, `OELLM_SCRATCH`, then `source leonardo.env` before `sbatch`. Everything below uses `$OELLM_SCRATCH`.
-Exporting the same variables from `~/.bash_profile` also works, but only login shells read it: a command sent as
-`ssh leonardo '...'` must `source ~/.bash_profile` first, or every path collapses to `/oellm-rl/...`.
+Alternatively export the same variables near the top of `~/.bashrc` (above any interactive-only `return`), which bash reads for
+remote `ssh leonardo '...'` commands too, so no `source` is needed; see the
+[image build guide](LEONARDO_LAION_IMAGE_BUILD_GUIDE.md), step 1. Avoid `~/.bash_profile` for this: only login shells read it, so
+remote commands see empty variables and every path collapses to `/oellm-rl/...`.
 
 ## 3. Layout
 
@@ -216,7 +218,7 @@ network, as another session demonstrated with its own relay.
 | Build: `TOOMANYREQUESTS` from Docker Hub | one shared proxy IP | base images pulled from `mirror.gcr.io` (done) |
 | Build: `invalid character 'e'/'}' after top-level value` | corrupted shared singularity cache (written during rate limiting and by parallel jobs) | one cache dir per job (done; until 17 Nov the sbatch file still shared one cache despite this row); delete a poisoned cache |
 | Download: thousands of `sha256sum: tasks/...: No such file or directory` | checksums were verified before `tasks.tar.zst` was extracted | extract first, then verify (fixed 17 Nov) |
-| Remote command finds nothing under `/oellm-rl/...` | `OELLM_*` set in `~/.bash_profile`, which `ssh host 'cmd'` does not read | `source ~/.bash_profile` first (section 2) |
+| Remote command finds nothing under `/oellm-rl/...` | `OELLM_*` set in `~/.bash_profile` (not read by `ssh host 'cmd'`) or below an interactive-only `return` in `~/.bashrc` | move the exports to the top of `~/.bashrc` (section 2) |
 | Build jobs die when the proxy ends | proxy limit is 4 h and build jobs read the address once | restart proxy, resubmit shards |
 | Summary shows task "failed" though it passed | Harbor reports the `task.toml` name, not the directory name | summarizer keys on the task directory (done) |
 | vLLM: `libxcb.so.1` missing during startup | spawned workers import OpenCV | `VLLM_WORKER_MULTIPROC_METHOD=fork` (done) |
