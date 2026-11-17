@@ -38,9 +38,11 @@ RELAY_PID=$!; trap 'kill $RELAY_PID 2>/dev/null || true' EXIT
 for _ in $(seq 1 30); do [[ -s "$RELAY_PORT_FILE" ]] && break; sleep 1; done
 [[ -s "$RELAY_PORT_FILE" ]] || { echo "relay did not start" >&2; exit 1; }
 export PROXY_LOCAL="http://127.0.0.1:$(cat "$RELAY_PORT_FILE")"
-export SINGULARITY_CACHEDIR="$OELLM_SCRATCH/oellm-rl/apptainer-cache" SINGULARITY_TMPDIR="$OELLM_SCRATCH/oellm-rl/apptainer-tmp/${SLURM_JOB_ID:-manual}"
+# One singularity cache per job: a cache shared by parallel shards gets corrupted (runbook section 7).
+export SINGULARITY_CACHEDIR="$OELLM_SCRATCH/oellm-rl/apptainer-cache/${SLURM_JOB_ID:-manual}" SINGULARITY_TMPDIR="$OELLM_SCRATCH/oellm-rl/apptainer-tmp/${SLURM_JOB_ID:-manual}"
 export APPTAINER_PREBUILD_RETRY_WITHOUT_FAKEROOT=0 PYTHONUNBUFFERED=1
 mkdir -p "$SIF_CACHE" "$SINGULARITY_CACHEDIR" "$SINGULARITY_TMPDIR" logs
+trap 'kill $RELAY_PID 2>/dev/null || true; rm -rf "$SINGULARITY_CACHEDIR" "$SINGULARITY_TMPDIR"' EXIT
 
 args=("$TASKS" --sif-cache "$SIF_CACHE" --max-workers "$SIF_BUILD_WORKERS" --build-timeout-sec "$SIF_BUILD_TIMEOUT_SEC")
 [[ -n "$CONTEXT_HASH_FILE" ]] && args+=(--context-hash-file "$CONTEXT_HASH_FILE")

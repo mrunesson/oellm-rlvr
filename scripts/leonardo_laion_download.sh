@@ -51,17 +51,18 @@ for name in "${DATASETS[@]}"; do
     "${HF[@]}" "laion/$name" --repo-type dataset --local-dir "$dest"
   fi
 
+  # The archive's paths start with tasks/, so extract into $dest (not $dest/tasks, which would nest tasks/tasks/).
+  # Extract before the checksum check: SHA256SUMS lists the loose tasks/ files, which only exist after extraction.
+  if [[ -f "$dest/tasks.tar.zst" && ! -d "$dest/tasks" ]]; then
+    tar --use-compress-program=zstd -xf "$dest/tasks.tar.zst" -C "$dest"
+  fi
+  [[ -d "$dest/tasks" ]] || echo "[warn] $name has no tasks/ directory; inspect its layout before use"
+
   if [[ -f "$dest/SHA256SUMS" ]]; then
     (cd "$dest" && sha256sum --quiet -c SHA256SUMS) || { echo "[FAIL] checksum mismatch: $name" >&2; exit 1; }
   else
     echo "[warn] $name has no SHA256SUMS; integrity not checked"
   fi
-
-  # The archive's paths start with tasks/, so extract into $dest (not $dest/tasks, which would nest tasks/tasks/).
-  if [[ -f "$dest/tasks.tar.zst" && ! -d "$dest/tasks" ]]; then
-    tar --use-compress-program=zstd -xf "$dest/tasks.tar.zst" -C "$dest"
-  fi
-  [[ -d "$dest/tasks" ]] || echo "[warn] $name has no tasks/ directory; inspect its layout before use"
 
   # Pin the revision (the cache metadata written by hf download, when present).
   rev=$(cat "$dest"/.cache/huggingface/download/*.metadata 2>/dev/null | head -n1 || true)

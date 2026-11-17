@@ -51,6 +51,8 @@ No training has happened. The reason to hold off is data, not code: with Prelude
 
 Configure site settings once: copy [../leonardo.env.example](../leonardo.env.example) to `leonardo.env` (git-ignored), fill in
 `OELLM_ACCOUNT`, `OELLM_WORK`, `OELLM_SCRATCH`, then `source leonardo.env` before `sbatch`. Everything below uses `$OELLM_SCRATCH`.
+Exporting the same variables from `~/.bash_profile` also works, but only login shells read it: a command sent as
+`ssh leonardo '...'` must `source ~/.bash_profile` first, or every path collapses to `/oellm-rl/...`.
 
 ## 3. Layout
 
@@ -62,6 +64,9 @@ Repo files (this repository):
 | `scripts/laion_rootless/fakeown.c` | `LD_PRELOAD` shim: `chown`/`setuid`-style calls return success |
 | `scripts/laion_rootless/local_relay.py` | Loopback relay that adds proxy credentials for Java (which ignores URL credentials) |
 | `scripts/laion_proxy.py`, `leonardo_laion_proxy.sbatch` | Token-protected HTTP/CONNECT proxy on an internet node (4 h) |
+| `scripts/leonardo_harbor_apptainer_bootstrap.sh` | One-time: Harbor fork at `82efa984` and its Python 3.12 venv (login node, needs `uv`) |
+| `scripts/leonardo_laion_download.sh` | One-time per dataset: download `tasks.tar.zst`, extract, verify `SHA256SUMS` (login node) |
+| `scripts/laion_context_hash_shards.py` | Lists the images still to build (Harbor's own discovery and cache check) and splits them into shards |
 | `scripts/leonardo_laion_sif_build_rootless.sbatch` | Builds sandbox images for one dataset or one shard |
 | `scripts/leonardo_laion_validate.sbatch` | Oracle and nop validation, writes `leonardo-compatible.jsonl` |
 | `scripts/summarize_laion_validation.py` | Summarises validation results (keyed on the task directory name) |
@@ -89,6 +94,18 @@ Count `*.sif` only. Counting every file in the cache doubles the number (each im
 
 ## 5. Procedures
 
+### 5.0 Set up a new account (once)
+
+Nothing under `$OELLM_SCRATCH/oellm-rl` is shared between users; a new account starts empty. On a login node:
+
+```bash
+git clone https://github.com/BirgerMoell/oellm-rlvr.git $OELLM_WORK/oellm-rlvr && cd $OELLM_WORK/oellm-rlvr && mkdir -p logs
+scripts/leonardo_harbor_apptainer_bootstrap.sh                      # needs uv in ~/.local/bin; ~2 minutes
+scripts/leonardo_laion_download.sh rts-1k-rootless-apptainer        # 338 MB extracted, 984 tasks
+```
+
+Submit every job below from this checkout (the sbatch files find `scripts/` and `logs/` relative to the submit directory).
+
 ### 5.1 Build images (once per dataset)
 
 Rootless build recipe, in short: `unshare -rm singularity build` (root inside a single-id namespace), the `fakeown.so` shim so file
@@ -96,17 +113,29 @@ ownership changes succeed, apt told to run as root, internet through a token-pro
 
 1. Start the proxy on an internet node (it exits after 14,000 s, so plan for that):
    `sbatch -A $OELLM_ACCOUNT scripts/leonardo_laion_proxy.sbatch`. It writes `$PROXY_DIR/proxy.host` and `proxy.token`.
-2. Prepare a context-hash list (one hash per line) and split it into shards. **There is no script for this yet**; the lists used so far
-   were produced ad hoc. Writing one is open work (section 9).
+2. Write the shard lists. The script uses Harbor's `discover_builds` (one entry per unique build context: 801 for the 984 rts-1k
+   tasks) and leaves out images already current in the cache, so rerunning it after a proxy expiry shards only the remaining work.
+   It takes about 2.5 minutes on Lustre and prints nothing until done (two `SyntaxWarning`s from task test files are harmless):
+
+```bash
+R=$OELLM_SCRATCH/oellm-rl
+PYTHONPATH=$R/src/harbor-laion/src $R/venvs/harbor-laion/bin/python -u scripts/laion_context_hash_shards.py \
+  $R/data/laion-ot/rts-1k-rootless-apptainer/tasks $R/sif-cache-x86_64 $R/sif-shards/rts-1k-rootless-apptainer --shards 4
+```
+
 3. Submit the shards (about 100 images per hour overall with four shards of 3 to 4 workers; the first 696 took about 5 hours):
 
 ```bash
-DATASET=rts-1k-rootless-apptainer CONTEXT_HASH_FILE=$PWD/shard-00 SIF_BUILD_WORKERS=3 \
-  sbatch -A $OELLM_ACCOUNT --time=04:00:00 --export=ALL scripts/leonardo_laion_sif_build_rootless.sbatch
+for f in $OELLM_SCRATCH/oellm-rl/sif-shards/rts-1k-rootless-apptainer/shard-*; do
+  DATASET=rts-1k-rootless-apptainer CONTEXT_HASH_FILE=$f SIF_BUILD_WORKERS=4 \
+    sbatch -A $OELLM_ACCOUNT --time=04:00:00 --export=ALL --job-name=laion-sif-$(basename $f) \
+    scripts/leonardo_laion_sif_build_rootless.sbatch
+done
 ```
 
-4. Build jobs read the proxy address once at start. **If the proxy expires first, restart a proxy, then resubmit the shards.**
-   Finished images are skipped, so no work is lost.
+4. Build jobs read the proxy address once at start (the loopback relay in `local_relay.py` reads it when the job starts).
+   **If the proxy expires first, restart a proxy, rerun step 2, then resubmit the shards.** Finished images are skipped, so no work
+   is lost. Each job uses its own singularity cache under `apptainer-cache/<jobid>`, deleted when the job exits.
 5. Image failures about 13 % are expected (npm `@jsr/...` 404s and similar). `glibc` images only; alpine/musl images do not work with the shim.
 
 ### 5.2 Validate tasks
@@ -185,7 +214,9 @@ network, as another session demonstrated with its own relay.
 | Build: `$APPTAINER_ROOTFS` empty, `mkdir /app` fails | SingularityPRO only defines `SINGULARITY_ROOTFS` | wrapper rewrites the def file |
 | Build: Maven "Network is unreachable" | Java ignores proxy credentials in URLs | loopback relay + `JAVA_TOOL_OPTIONS` (done). Clojure tooling still ignores it, so 1 known image fails |
 | Build: `TOOMANYREQUESTS` from Docker Hub | one shared proxy IP | base images pulled from `mirror.gcr.io` (done) |
-| Build: `invalid character 'e'/'}' after top-level value` | corrupted shared singularity cache (written during rate limiting and by parallel jobs) | one cache dir per job (done); delete a poisoned cache |
+| Build: `invalid character 'e'/'}' after top-level value` | corrupted shared singularity cache (written during rate limiting and by parallel jobs) | one cache dir per job (done; until 17 Nov the sbatch file still shared one cache despite this row); delete a poisoned cache |
+| Download: thousands of `sha256sum: tasks/...: No such file or directory` | checksums were verified before `tasks.tar.zst` was extracted | extract first, then verify (fixed 17 Nov) |
+| Remote command finds nothing under `/oellm-rl/...` | `OELLM_*` set in `~/.bash_profile`, which `ssh host 'cmd'` does not read | `source ~/.bash_profile` first (section 2) |
 | Build jobs die when the proxy ends | proxy limit is 4 h and build jobs read the address once | restart proxy, resubmit shards |
 | Summary shows task "failed" though it passed | Harbor reports the `task.toml` name, not the directory name | summarizer keys on the task directory (done) |
 | vLLM: `libxcb.so.1` missing during startup | spawned workers import OpenCV | `VLLM_WORKER_MULTIPROC_METHOD=fork` (done) |
@@ -222,8 +253,7 @@ broken. Prefer the debug QoS for short jobs.
    datasets such as `laion/nemotron-terminal-easy-clean1k` or `laion/tasktrove-curriculum-easy`, or a stronger starting checkpoint.
 3. Port the SkyRL training step with the apptainer environment: bridge and workers inside the training job, CUDA and A100 memory
    limits, the reward and verifier plumbing. The LUMI version is `scripts/lumi_harbor_agentic_train.sbatch`.
-4. Write a script to generate and split the image context-hash lists (step 5.1.2).
-5. Decide on the gateway (section 6). Fix the E8 think-tag error if that model matters.
+4. Decide on the gateway (section 6). Fix the E8 think-tag error if that model matters.
 
 ## 10. Glossary
 
