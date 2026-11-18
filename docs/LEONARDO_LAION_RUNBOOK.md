@@ -71,6 +71,7 @@ Repo files (this repository):
 | `scripts/laion_context_hash_shards.py` | Lists the images still to build (Harbor's own discovery and cache check) and splits them into shards |
 | `scripts/leonardo_laion_sif_build_rootless.sbatch` | Builds sandbox images for one dataset or one shard |
 | `scripts/leonardo_laion_validate.sbatch` | Oracle and nop validation, writes `leonardo-compatible.jsonl` |
+| `scripts/leonardo_laion_validate_all.sh` | Validates every task that has an image: chunks, submits, resubmits, merges into one list |
 | `scripts/summarize_laion_validation.py` | Summarises validation results (keyed on the task directory name) |
 | `scripts/leonardo_laion_agent_rollout.sbatch` | vLLM + Terminus-2 + sandboxes + verifier, writes `rollout-summary.json` |
 | `scripts/analyze_rollout.py` | Classifies rollout outcomes (passed, used all turns, stopped early, each error type) |
@@ -142,6 +143,22 @@ done
 
 ### 5.2 Validate tasks
 
+Whole dataset (every task whose image built), from the repo checkout:
+
+```bash
+scripts/leonardo_laion_validate_all.sh submit   # chunks of 200 tasks, one 30-minute debug job each, ATTEMPTS=3
+scripts/leonardo_laion_validate_all.sh retry    # later: submits chunks the queue refused or that ended without results
+scripts/leonardo_laion_validate_all.sh merge    # when all jobs ended: writes laion-validation/<dataset>-leonardo-compatible-all.jsonl
+```
+
+`submit` takes the tasks named in the cache's `.sif.build.json` files (written only after a successful build) and writes the
+run to `laion-validation/<dataset>-full-<date>/` (`chunk-NN.txt`, `jobs.txt`, `no-image.txt`). The debug QoS accepts **4 jobs per
+user** (`QOSMaxSubmitJobPerUserLimit`); `submit` stops at the limit and `retry` submits the rest once a job has ended. `merge`
+refuses to write the list while any chunk lacks results, and writes `failures.json` with the reason for every rejected task.
+Overrides: `CHUNK`, `ATTEMPTS`, `QOS` (empty for the normal queue, then also set `TIME`), `WORKERS_PER_NODE`.
+
+A single list or a shipped subset:
+
 ```bash
 DATASET=rts-1k-rootless-apptainer SUBSET=list TASK_LIST=$PWD/val-chunk-00 ATTEMPTS=3 \
   sbatch -A $OELLM_ACCOUNT --qos=boost_qos_dbg --time=00:30:00 --export=ALL scripts/leonardo_laion_validate.sbatch
@@ -149,7 +166,7 @@ DATASET=rts-1k-rootless-apptainer SUBSET=list TASK_LIST=$PWD/val-chunk-00 ATTEMP
 
 `SUBSET` is `overfit`, `diagnostic`, `all` or `list` (with `TASK_LIST`, one task id per line). About 250 tasks per 30-minute debug job
 is the limit. The output `leonardo-compatible.jsonl` lists tasks where the oracle scored 1 and the nop agent 0 on every attempt.
-Merge the chunks into one list for the rollout job.
+One task with `ATTEMPTS=1` takes about 2.5 minutes in total.
 
 ### 5.3 Roll out a model
 
@@ -217,6 +234,7 @@ network, as another session demonstrated with its own relay.
 | Build: Maven "Network is unreachable" | Java ignores proxy credentials in URLs | loopback relay + `JAVA_TOOL_OPTIONS` (done). Clojure tooling still ignores it, so 1 known image fails |
 | Build: `TOOMANYREQUESTS` from Docker Hub | one shared proxy IP | base images pulled from `mirror.gcr.io` (done) |
 | Build: `invalid character 'e'/'}' after top-level value` | corrupted shared singularity cache (written during rate limiting and by parallel jobs) | one cache dir per job (done; until 17 Nov the sbatch file still shared one cache despite this row); delete a poisoned cache |
+| `sbatch: error: QOSMaxSubmitJobPerUserLimit` | the debug QoS accepts 4 jobs per user | wait for one to end; `leonardo_laion_validate_all.sh retry` |
 | Download: thousands of `sha256sum: tasks/...: No such file or directory` | checksums were verified before `tasks.tar.zst` was extracted | extract first, then verify (fixed 17 Nov) |
 | Remote command finds nothing under `/oellm-rl/...` | `OELLM_*` set in `~/.bash_profile` (not read by `ssh host 'cmd'`) or below an interactive-only `return` in `~/.bashrc` | move the exports to the top of `~/.bashrc` (section 2) |
 | Build jobs die when the proxy ends | proxy limit is 4 h and build jobs read the address once | restart proxy, resubmit shards |

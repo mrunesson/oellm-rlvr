@@ -1,7 +1,7 @@
 # Guide: build the sandbox images for a LAION dataset on Leonardo
 
 This guide takes you from an empty Leonardo account to a folder of ready-to-use sandbox images for the dataset
-`laion/rts-1k-rootless-apptainer`. Every step says what it does and why, what you should see, and what to do if it goes wrong.
+`laion/rts-1k-rootless-apptainer`, and then (Part D) to a checked list of the tasks that work. Every step says what it does and why, what you should see, and what to do if it goes wrong.
 It assumes you are logged in to a Leonardo **login node** in a normal shell. For background and other procedures (validation,
 rollouts) see [LEONARDO_LAION_RUNBOOK.md](LEONARDO_LAION_RUNBOOK.md).
 
@@ -282,8 +282,87 @@ finished cache to the project work area.
 
 ### What comes next
 
-The images are only the first step. Next you check that each task works (the reference solution must pass and doing nothing must
-fail) with `scripts/leonardo_laion_validate.sbatch`. See section 5.2 of the [runbook](LEONARDO_LAION_RUNBOOK.md).
+The images are only the first step. Part D checks that each task actually works.
+
+---
+
+## Part D: check that the tasks work (about 1 to 2 hours)
+
+An image existing does not mean its task is usable. Each task is run in its sandbox by two automatic "agents":
+
+- the **oracle**, which runs the task's reference solution. It must score **1**, showing the task can be solved and the checker
+  recognises a correct answer;
+- the **nop** agent, which does nothing. It must score **0**, showing the checker does not pass an empty attempt.
+
+Only tasks that get 1 and 0 on every attempt are kept for training. No model or GPU is involved; the sandboxes only use CPU.
+
+### Step 10. Try one task first (optional, 5 minutes)
+
+To see the whole chain work before starting the big run, run one task once. Pick any task whose image built:
+
+```bash
+cd $OELLM_WORK/oellm-rlvr
+TASK=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["task_names"][0])' \
+  $(ls $OELLM_SCRATCH/oellm-rl/sif-cache-x86_64/*.sif.build.json | head -1))
+head -5 $OELLM_SCRATCH/oellm-rl/data/laion-ot/rts-1k-rootless-apptainer/tasks/$TASK/instruction.md   # what the task asks
+echo $TASK > $OELLM_SCRATCH/oellm-rl/one-task.txt
+DATASET=rts-1k-rootless-apptainer SUBSET=list TASK_LIST=$OELLM_SCRATCH/oellm-rl/one-task.txt ATTEMPTS=1 WORKERS_PER_NODE=2 \
+  sbatch -A $OELLM_ACCOUNT --qos=boost_qos_dbg --time=00:30:00 --cpus-per-task=8 --mem=32G --export=ALL \
+  scripts/leonardo_laion_validate.sbatch
+```
+
+It takes about 2.5 minutes once it starts. Then, with the job number `sbatch` printed:
+
+```bash
+tail -5 logs/<jobid>.laion-validate.out                       # ends with "compatible": 1 for a working task
+find $OELLM_SCRATCH/oellm-rl/laion-validation/*-<jobid>/jobs -name reward.txt | xargs grep .   # oracle 1, nop 0
+```
+
+### Step 11. Check every task
+
+```bash
+cd $OELLM_WORK/oellm-rlvr
+scripts/leonardo_laion_validate_all.sh submit
+```
+
+What it does: lists every task whose image built (874 of 984 in our run; the others are written to `no-image.txt`), splits them
+into chunks of 200, and submits one 30-minute debug job per chunk. Each task is run 3 times with each agent.
+
+The debug queue accepts only **4 jobs per user** at a time, so with 5 chunks you will see:
+
+```
+STOP: the queue refused chunk-04.txt (the debug queue allows 4 jobs per user).
+```
+
+That is expected. When one of the jobs has finished (check with `squeue -u $USER`), submit the rest:
+
+```bash
+scripts/leonardo_laion_validate_all.sh retry
+```
+
+`retry` is always safe to run: it skips chunks that are queued, running or done, and also resubmits a chunk whose job ended
+without results (for example because it ran out of time).
+
+### Step 12. Collect the results
+
+When `squeue -u $USER` shows no more `laion-validate` jobs:
+
+```bash
+scripts/leonardo_laion_validate_all.sh merge
+```
+
+It prints how many tasks passed in each chunk and in total, and writes:
+
+| File | What it holds |
+|---|---|
+| `$OELLM_SCRATCH/oellm-rl/laion-validation/rts-1k-rootless-apptainer-leonardo-compatible-all.jsonl` | The usable tasks, one per line. The rollout job reads this file by default |
+| `.../laion-validation/rts-1k-rootless-apptainer-full-<date>/failures.json` | Every rejected task and why (oracle failed, nop passed, or an error) |
+
+If it says `NOT merged`, some chunks have no results yet; it lists them. Run `retry`, wait, and run `merge` again.
+
+In the earlier run on another account, 741 of the 984 tasks were usable. A similar number is a good result.
+
+After this, the tasks are ready for a model: see section 5.3 of the [runbook](LEONARDO_LAION_RUNBOOK.md) for running a model on them.
 
 ---
 
@@ -300,4 +379,6 @@ fail) with `scripts/leonardo_laion_validate.sbatch`. See section 5.2 of the [run
 | Build job log: `relay did not start` | The proxy files exist but the proxy is not reachable | Check that the proxy job is `RUNNING`; restart it (step 5) and resubmit |
 | Many `FAILED` lines with network errors | The proxy has stopped | Step 9 |
 | `invalid character 'e' after top-level value` | A corrupted download cache | Each job now has its own cache; resubmit. If it persists, report it |
+| `sbatch: error: QOSMaxSubmitJobPerUserLimit` | The debug queue accepts 4 jobs per user | Wait for one to finish, then `scripts/leonardo_laion_validate_all.sh retry` |
+| `merge` says `NOT merged` | Some chunks are still running, failed, or were never submitted | `retry`, wait, `merge` again |
 | `Permission denied (publickey)` when connecting | Your Leonardo SSH certificate (about 12 hours) has expired | Renew it from your own computer with `step ssh login` |
