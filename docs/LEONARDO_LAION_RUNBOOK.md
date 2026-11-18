@@ -72,6 +72,7 @@ Repo files (this repository):
 | `scripts/leonardo_laion_sif_build_rootless.sbatch` | Builds sandbox images for one dataset or one shard |
 | `scripts/leonardo_laion_validate.sbatch` | Oracle and nop validation, writes `leonardo-compatible.jsonl` |
 | `scripts/leonardo_laion_validate_all.sh` | Validates every task that has an image: chunks, submits, resubmits, merges into one list |
+| `docs/LEONARDO_LAION_IMAGE_BUILD_GUIDE.md`, `docs/LEONARDO_LAION_VERIFICATION_GUIDE.md` | Step-by-step guides for humans: new account to images, images to the usable-task list |
 | `scripts/summarize_laion_validation.py` | Summarises validation results (keyed on the task directory name) |
 | `scripts/leonardo_laion_agent_rollout.sbatch` | vLLM + Terminus-2 + sandboxes + verifier, writes `rollout-summary.json` |
 | `scripts/analyze_rollout.py` | Classifies rollout outcomes (passed, used all turns, stopped early, each error type) |
@@ -143,17 +144,20 @@ done
 
 ### 5.2 Validate tasks
 
-Whole dataset (every task whose image built), from the repo checkout:
+Whole dataset (every task whose image built), from the repo checkout. Step by step for humans:
+[LEONARDO_LAION_VERIFICATION_GUIDE.md](LEONARDO_LAION_VERIFICATION_GUIDE.md).
 
 ```bash
-scripts/leonardo_laion_validate_all.sh submit   # chunks of 200 tasks, one 30-minute debug job each, ATTEMPTS=3
+scripts/leonardo_laion_validate_all.sh submit   # chunks of 150 tasks, one 30-minute debug job each, ATTEMPTS=3
 scripts/leonardo_laion_validate_all.sh retry    # later: submits chunks the queue refused or that ended without results
 scripts/leonardo_laion_validate_all.sh merge    # when all jobs ended: writes laion-validation/<dataset>-leonardo-compatible-all.jsonl
 ```
 
 `submit` takes the tasks named in the cache's `.sif.build.json` files (written only after a successful build) and writes the
 run to `laion-validation/<dataset>-full-<date>/` (`chunk-NN.txt`, `jobs.txt`, `no-image.txt`). The debug QoS accepts **4 jobs per
-user** (`QOSMaxSubmitJobPerUserLimit`); `submit` stops at the limit and `retry` submits the rest once a job has ended. `merge`
+user** (`QOSMaxSubmitJobPerUserLimit`) and **runs 2 at a time** (the others show reason `QOSMaxJobsPerUserLimit` while they
+wait; that is not a failure). `submit` stops at the limit and `retry` submits the rest once a job has ended. A 200-task chunk used
+the full 30 minutes (one ran 31.5), hence the default of 150. 874 tasks therefore take about 6 chunks and 1.5 hours. `merge`
 refuses to write the list while any chunk lacks results, and writes `failures.json` with the reason for every rejected task.
 Overrides: `CHUNK`, `ATTEMPTS`, `QOS` (empty for the normal queue, then also set `TIME`), `WORKERS_PER_NODE`.
 
@@ -235,6 +239,8 @@ network, as another session demonstrated with its own relay.
 | Build: `TOOMANYREQUESTS` from Docker Hub | one shared proxy IP | base images pulled from `mirror.gcr.io` (done) |
 | Build: `invalid character 'e'/'}' after top-level value` | corrupted shared singularity cache (written during rate limiting and by parallel jobs) | one cache dir per job (done; until 17 Nov the sbatch file still shared one cache despite this row); delete a poisoned cache |
 | `sbatch: error: QOSMaxSubmitJobPerUserLimit` | the debug QoS accepts 4 jobs per user | wait for one to end; `leonardo_laion_validate_all.sh retry` |
+| Pending jobs with reason `QOSMaxJobsPerUserLimit` | the debug QoS runs 2 jobs per user at a time | nothing; they start when one ends |
+| `LiteLLM ... ConnectError ... model_prices_and_context_window.json` in `.err` | litellm fetches a price list; compute nodes are offline | harmless, it falls back to its built-in copy |
 | Download: thousands of `sha256sum: tasks/...: No such file or directory` | checksums were verified before `tasks.tar.zst` was extracted | extract first, then verify (fixed 17 Nov) |
 | Remote command finds nothing under `/oellm-rl/...` | `OELLM_*` set in `~/.bash_profile` (not read by `ssh host 'cmd'`) or below an interactive-only `return` in `~/.bashrc` | move the exports to the top of `~/.bashrc` (section 2) |
 | Build jobs die when the proxy ends | proxy limit is 4 h and build jobs read the address once | restart proxy, resubmit shards |
@@ -259,6 +265,8 @@ broken. Prefer the debug QoS for short jobs.
 
 - 3-task smoke test: oracle 1.0, nop 0.0 on all three.
 - Validation: 79 of 100 (overfit set), 741 of 984 (full set).
+- Second account from scratch (17 to 18 Nov 2026): 801 unique images, 708 built (88 %); 874 tasks with an image; **743 of 984
+  usable** (131 rejected in validation, 110 without an image). Four 200-task chunks and one 74-task chunk, about 30 minutes each.
 - Agent rollouts: 0 of 15 (20 turns); 2 of about 110 scored (30 turns; 87 % used every turn); **17 of 203 scored (100 turns)** with 12
   mixed tasks. 186 of 400 trials had no score because of sandbox errors (154 disk, 25 overlay, 7 tmux).
 - Hallucination benchmark: 97.7 % fabrication on made-up subjects (default mode), 93.6 % (thinking), 2.3 % and 6.4 % honest "I don't

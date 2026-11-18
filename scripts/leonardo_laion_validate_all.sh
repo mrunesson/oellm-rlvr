@@ -6,12 +6,13 @@
 #   scripts/leonardo_laion_validate_all.sh merge    # after the jobs end: write $RESULTS_ROOT/<dataset>-leonardo-compatible-all.jsonl
 # A task is listed only if its image has a .sif.build.json (written after a successful build). Tasks without an image are
 # written to no-image.txt in the run folder. merge uses the newest run unless RUN=<run folder> is set.
-# Env: DATASET (rts-1k-rootless-apptainer), CHUNK (200 tasks per job), ATTEMPTS (3), QOS (boost_qos_dbg; empty = normal
-# queue), TIME (00:30:00), WORKERS_PER_NODE (16).
+# Env: DATASET (rts-1k-rootless-apptainer), CHUNK (150 tasks per job; 200 used the full 30 minutes), ATTEMPTS (3), QOS
+# (boost_qos_dbg; empty = normal queue), TIME (00:30:00), WORKERS_PER_NODE (16).
+# The debug QoS accepts 4 jobs per user and runs 2 at a time; the others wait with reason QOSMaxJobsPerUserLimit.
 set -euo pipefail
 : "${OELLM_SCRATCH:?set the OELLM_* variables first (see the runbook, section 2)}"
 : "${DATASET:=rts-1k-rootless-apptainer}"
-: "${CHUNK:=200}"
+: "${CHUNK:=150}"
 : "${ATTEMPTS:=3}"
 : "${QOS=boost_qos_dbg}"
 : "${TIME:=00:30:00}"
@@ -72,7 +73,7 @@ submit_chunks() {
     if ! id=$(DATASET=$DATASET SUBSET=list TASK_LIST=$f ATTEMPTS=$ATTEMPTS WORKERS_PER_NODE=$WORKERS_PER_NODE \
         sbatch --parsable -A "$OELLM_ACCOUNT" "${qos[@]}" --time="$TIME" --export=ALL --job-name=laion-validate \
         scripts/leonardo_laion_validate.sbatch); then
-      echo "STOP: the queue refused $chunk (the debug queue allows 4 jobs per user)."
+      echo "STOP: the queue refused $chunk (the debug queue accepts 4 jobs per user; this is expected with more chunks)."
       echo "When a job has finished, run: $0 retry"
       return 0
     fi
