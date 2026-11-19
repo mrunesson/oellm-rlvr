@@ -43,6 +43,9 @@ No training has happened. The reason to hold off is data, not code: with Prelude
 - **Login nodes**: internet, but user namespaces disabled. **Compute nodes**: user namespaces enabled, **no internet**.
 - `/etc/subuid` is empty, so `singularity --fakeroot` fails everywhere.
 - System `python3` is 3.6. Use the Harbor venv's Python 3.12.
+- GPU nodes run NVIDIA driver **535** (CUDA 12.2 and older natively). Newer CUDA containers need CUDA forward compatibility
+  (section 5.3). The rollout job's default vLLM container lives in another project's work area and is not readable from other
+  accounts; pull your own (5.3).
 - Node-local `/tmp` (the job's `TMPDIR`) is **10 GB** by default; Slurm rejects larger `tmpfs` requests (tried 40 to 200 GB).
 - The SSH certificate lasts about 12 hours. Renew from your own machine (needs your login and second factor, an agent cannot do it):
   `step ssh login '<CINECA e-mail>' --provisioner cineca-hpc`, then check `ssh leonardo hostname`.
@@ -75,6 +78,8 @@ Repo files (this repository):
 | `docs/LEONARDO_LAION_IMAGE_BUILD_GUIDE.md`, `docs/LEONARDO_LAION_VERIFICATION_GUIDE.md` | Step-by-step guides for humans: new account to images, images to the usable-task list |
 | `scripts/summarize_laion_validation.py` | Summarises validation results (keyed on the task directory name) |
 | `scripts/leonardo_laion_agent_rollout.sbatch` | vLLM + Terminus-2 + sandboxes + verifier, writes `rollout-summary.json` |
+| `scripts/leonardo_vllm_container_pull.sbatch` | Pulls the public `vllm/vllm-openai` image into a SIF on an internet node |
+| `scripts/leonardo_vllm_smoke.sbatch` | One-GPU check: driver, CUDA compat, vLLM imports, model loads, one chat reply |
 | `scripts/analyze_rollout.py` | Classifies rollout outcomes (passed, used all turns, stopped early, each error type) |
 | `scripts/leonardo_halu_bench.sbatch` | Hallucination benchmark job (section 5.6) |
 | `src/oellm_rlvr/web_gateway.py`, `scripts/leonardo_web_gateway.sbatch` | Web-search gateway sidecar (section 6). Tested locally, never run on Leonardo |
@@ -83,7 +88,9 @@ Repo files (this repository):
 On Leonardo (under `$OELLM_SCRATCH/oellm-rl/`): `venvs/harbor-laion` (Python 3.12 with Harbor), `src/harbor-laion` (the Harbor fork
 `marianna13/harbor` at commit `82efa984`), `data/laion-ot/<dataset>/tasks`, `sif-cache-x86_64/` (built images), `proxy/`
 (`proxy.host`, `proxy.token`, `fakeown.so`), `laion-validation/` (validation outputs and
-`rts-1k-leonardo-compatible-all.jsonl`), `laion-rollouts/<dataset>-<jobid>/` (rollout outputs), `models/` (downloaded checkpoints).
+`<dataset>-leonardo-compatible-all.jsonl`, the rollout job's default task list; older runs named it
+`rts-1k-leonardo-compatible-all.jsonl`, which the rollout job still finds), `laion-rollouts/<dataset>-<jobid>/` (rollout outputs),
+`models/` (downloaded checkpoints), `containers/` (a pulled vLLM image, if the project container is not readable).
 Copy or clone the repo's `scripts/` to the cluster before submitting (login nodes have internet, so `git clone` works).
 
 ## 4. Daily commands
@@ -174,6 +181,33 @@ One task with `ATTEMPTS=1` takes about 2.5 minutes in total.
 
 ### 5.3 Roll out a model
 
+**vLLM.** The default `VLLM_CONTAINER` (under `/leonardo_work/OELLM_prod2026/`) and `VLLM_PY` (a venv under
+`tmax-reproduction/`) only exist for the account that made them. Otherwise pull the public image and use its own Python:
+
+```bash
+sbatch -A $OELLM_ACCOUNT --export=ALL scripts/leonardo_vllm_container_pull.sbatch     # ~1 h on lrd_all_serial, 10.9 GB SIF
+export VLLM_CONTAINER=$OELLM_SCRATCH/oellm-rl/containers/vllm-openai-v0.32.0-x86_64-cu129.sif VLLM_PY=python3
+```
+
+`v0.32.0-x86_64-cu129` is the newest tag built for CUDA 12 (later tags are CUDA 13 only). Two fixes make it run on driver 535;
+both are on by default in the smoke and rollout jobs:
+
+- `VLLM_CUDA_COMPAT=1`: puts the container's `/usr/local/cuda/compat` (CUDA forward-compatibility driver) ahead of the host libcuda
+  that `--nv` adds. Without it the engine dies during kernel warm-up. The smoke job prints `cuDriverGetVersion 12090` when active.
+  `VLLM_USE_FLASHINFER_SAMPLER=0` uses vLLM's PyTorch sampler instead of FlashInfer's run-time compiled one.
+- `VLLM_STUB_TORCHCODEC=1`: the image's `torchcodec` is a CUDA 13 build; its `OSError` escapes vLLM's optional-audio import. A
+  stand-in package raising `ImportError` disables audio input (unused by text models).
+
+**Model.** Download on a login node (`hf download <repo> --local-dir $OELLM_SCRATCH/oellm-rl/models/<name>`, about 18 GB for 9B).
+A `chat_template.jinja` in the model folder is passed to vLLM automatically (`CHAT_TEMPLATE` overrides). Check a new model or
+container on one GPU first (debug queue, about 5 minutes; ends with `SMOKE OK`):
+
+```bash
+MODEL=$OELLM_SCRATCH/oellm-rl/models/<model> sbatch -A $OELLM_ACCOUNT --export=ALL scripts/leonardo_vllm_smoke.sbatch
+```
+
+Then a short rollout (`N_TASKS=8 ATTEMPTS=2 MAX_TURNS=30`, `--time=01:00:00`, about 30 minutes) before the full one:
+
 ```bash
 MODEL=$OELLM_SCRATCH/oellm-rl/models/<model> DP_SIZE=4 N_TASKS=100 ATTEMPTS=4 CONCURRENT=48 \
   WORKERS_PER_NODE=28 MAX_TURNS=100 SEED=2 \
@@ -181,11 +215,11 @@ MODEL=$OELLM_SCRATCH/oellm-rl/models/<model> DP_SIZE=4 N_TASKS=100 ATTEMPTS=4 CO
 ```
 
 What it does: starts vLLM (`DP_SIZE` replicas, one per GPU), starts the Harbor bridge server and workers, waits for vLLM (loading 17 GB
-on four GPUs takes about 7 to 10 minutes), then runs Harbor's **Terminus-2** agent on `N_TASKS` shuffled tasks from the validated list,
+on four GPUs takes about 3 to 10 minutes), then runs Harbor's **Terminus-2** agent on `N_TASKS` shuffled tasks from the validated list,
 and writes `rollout-summary.json` (per-task rewards, exceptions). Run `scripts/analyze_rollout.py <run>/jobs/rollout --max-turns <N>` for a
 breakdown.
 
-Useful variables: `TASK_LIST` (default is the validated list), `MAX_TURNS`, `TEMPERATURE` (0.6), `MAX_MODEL_LEN` (32768),
+Useful variables: `TASK_LIST` (default `laion-validation/<dataset>-leonardo-compatible-all.jsonl` from 5.2), `MAX_TURNS`, `TEMPERATURE` (0.6), `MAX_MODEL_LEN` (32768),
 `MAX_TOKENS_PER_TURN` (4096), `AGENT_TIMEOUT_MULT` (3.0), `EXCLUDE_BASE` (see 7), `STAGING_ROOT` (default `/dev/shm`),
 `BRIDGE_OVERLAY_SIZE_MB` (512), `VLLM_WAIT_STEPS` (5 s steps, default 420).
 
@@ -201,6 +235,12 @@ training candidate. A task with 0 of 4 passes gives no RL signal, and a task tha
 ### 5.5 Models used so far
 
 - `marianna13/prelude-9b-sft-v2`: Qwen3 architecture, ChatML template with `<think>` and Hermes tool calls. Works in the harness.
+  On a second account (vLLM 0.32 container, 19 Nov 2026), 8 tasks x 2 attempts at 30 turns: 16 of 16 scored, 1 passed, 13 used
+  all 30 turns; so give it 100 turns.
+- `openeurollm/Prelude-Marianna-midtrain-SFT-Excellent-v0.2`: same template family (`chat_template.jinja`), loads and answers
+  with separate reasoning. In the harness it declares the task done after about 3 turns (11 of 16 trials), 0 of 12 scored passed,
+  and 4 of 16 ended in `AddTestsDirError` (bridge HTTP 409 when adding the tests); same 8 tasks as above.
+- `openeurollm/prelude-base`: base model without a chat template; not usable with Terminus-2 as is.
 - `birgermoell/oellm-9b-256k-stage5-e8-search-rl-step160`: fails in the harness (vLLM rejects think tags in message content). Not a
   terminal-agent model.
 
@@ -238,6 +278,11 @@ network, as another session demonstrated with its own relay.
 | Build: Maven "Network is unreachable" | Java ignores proxy credentials in URLs | loopback relay + `JAVA_TOOL_OPTIONS` (done). Clojure tooling still ignores it, so 1 known image fails |
 | Build: `TOOMANYREQUESTS` from Docker Hub | one shared proxy IP | base images pulled from `mirror.gcr.io` (done) |
 | Build: `invalid character 'e'/'}' after top-level value` | corrupted shared singularity cache (written during rate limiting and by parallel jobs) | one cache dir per job (done; until 17 Nov the sbatch file still shared one cache despite this row); delete a poisoned cache |
+| `ls: ... OELLM_prod2026/container_images: Permission denied` | the default vLLM container belongs to another project | pull your own (5.3) |
+| vLLM: `OSError: Could not load this library: .../torchcodec/libtorchcodec_image.so` (`libnvrtc.so.13`) | CUDA 13 torchcodec in a CUDA 12.9 image | `VLLM_STUB_TORCHCODEC=1` (default) |
+| vLLM: `EngineCore failed to start` in `warmup_kernels` | CUDA 12.9 container on the 535 driver | `VLLM_CUDA_COMPAT=1`, `VLLM_USE_FLASHINFER_SAMPLER=0` (defaults) |
+| Rollout fails in seconds: `FileNotFoundError ... compatible-all.jsonl` | task list name differs | fixed: the default follows `validate_all.sh merge`; or set `TASK_LIST` |
+| `Failed to install asciinema using pip` in the rollout `.err` | the agent tries to install a recorder; sandboxes are offline | harmless |
 | `sbatch: error: QOSMaxSubmitJobPerUserLimit` | the debug QoS accepts 4 jobs per user | wait for one to end; `leonardo_laion_validate_all.sh retry` |
 | Pending jobs with reason `QOSMaxJobsPerUserLimit` | the debug QoS runs 2 jobs per user at a time | nothing; they start when one ends |
 | `LiteLLM ... ConnectError ... model_prices_and_context_window.json` in `.err` | litellm fetches a price list; compute nodes are offline | harmless, it falls back to its built-in copy |

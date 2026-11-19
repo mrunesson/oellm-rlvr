@@ -6,7 +6,7 @@
 #   source leonardo.env
 #   MODEL=$OELLM_SCRATCH/oellm-rl/models/prelude-9b-sft-v2 N_TASKS=16 ATTEMPTS=2 \
 #     sbatch --qos=boost_qos_dbg --time=00:30:00 scripts/leonardo_laion_agent_rollout.sbatch
-# TASK_LIST: file with {"task_id": ...} lines (default: the validated rts-1k compatible list). Tasks are taken in shuffled order (SEED).
+# TASK_LIST: file with {"task_id": ...} lines (default: laion-validation/<dataset>-leonardo-compatible-all.jsonl). Tasks are taken in shuffled order (SEED).
 #SBATCH --job-name=laion-agent-rollout
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
@@ -35,7 +35,13 @@ set -euo pipefail
 : "${SERVED_NAME:=policy}"
 : "${CONTROL_ROOT:=${SLURM_SUBMIT_DIR:-$PWD}}"
 : "${ROOT:=$OELLM_SCRATCH/oellm-rl}"
-: "${TASK_LIST:=$ROOT/laion-validation/rts-1k-leonardo-compatible-all.jsonl}"
+# Default: the list leonardo_laion_validate_all.sh merge writes; rts-1k-leonardo-compatible-all.jsonl is the name used before it.
+if [[ -z "${TASK_LIST:-}" ]]; then
+  TASK_LIST="$ROOT/laion-validation/$DATASET-leonardo-compatible-all.jsonl"
+  [[ -f "$TASK_LIST" || ! -f "$ROOT/laion-validation/rts-1k-leonardo-compatible-all.jsonl" ]] \
+    || TASK_LIST="$ROOT/laion-validation/rts-1k-leonardo-compatible-all.jsonl"
+fi
+[[ -s "$TASK_LIST" ]] || { echo "no task list at $TASK_LIST (run leonardo_laion_validate_all.sh merge, or set TASK_LIST)" >&2; exit 1; }
 : "${LAION_ROOT:=$ROOT/data/laion-ot}"
 : "${HARBOR_LAION_ROOT:=$ROOT/src/harbor-laion}"
 : "${HARBOR_LAION_VENV:=$ROOT/venvs/harbor-laion}"
@@ -96,12 +102,34 @@ trap cleanup EXIT INT TERM
 # 1. policy server(s) (OpenAI-compatible; Qwen3 reasoning parser matches the Prelude chat template). DP_SIZE data-parallel
 #    replicas behind one endpoint, one per GPU.
 : "${DP_SIZE:=1}"
-singularity exec --nv -B /leonardo_work,/leonardo_scratch "$VLLM_CONTAINER" \
+# Newer checkpoints ship the template as chat_template.jinja instead of inside tokenizer_config.json, which older transformers
+# versions do not read; pass it explicitly. CHAT_TEMPLATE overrides the file.
+: "${CHAT_TEMPLATE:=}"
+[[ -z "$CHAT_TEMPLATE" && -f "$MODEL/chat_template.jinja" ]] && CHAT_TEMPLATE="$MODEL/chat_template.jinja"
+VLLM_EXTRA=(); [[ -n "$CHAT_TEMPLATE" ]] && VLLM_EXTRA+=(--chat-template "$CHAT_TEMPLATE")
+# vllm-openai:v0.32.0-x86_64-cu129 ships a torchcodec built for CUDA 13; its OSError escapes vLLM's optional-audio import.
+# A stand-in package raising ImportError disables audio input (unused by text models). The container's PYTHONPATH is set
+# explicitly so the Harbor path exported above does not leak into vLLM's Python.
+: "${VLLM_STUB_TORCHCODEC:=1}"
+VLLM_PP=""
+if [[ "$VLLM_STUB_TORCHCODEC" == 1 ]]; then
+  VLLM_PP="$ROOT/containers/stubs"; mkdir -p "$VLLM_PP/torchcodec"
+  echo 'raise ImportError("torchcodec disabled: the container build needs CUDA 13 libraries (see leonardo_vllm_smoke.sbatch)")' \
+    > "$VLLM_PP/torchcodec/__init__.py"
+fi
+# Leonardo's R535 driver is older than a CUDA 12.9 container: use the container's CUDA forward-compatibility driver
+# (/usr/local/cuda/compat, ahead of the host libcuda that --nv adds) and vLLM's PyTorch sampler instead of FlashInfer's
+# run-time compiled one. See leonardo_vllm_smoke.sbatch. Both are no-ops for a container without compat libraries.
+: "${VLLM_CUDA_COMPAT:=1}" "${VLLM_USE_FLASHINFER_SAMPLER:=0}"
+export VLLM_CUDA_COMPAT VLLM_USE_FLASHINFER_SAMPLER
+singularity exec --nv -B /leonardo_work,/leonardo_scratch --env "PYTHONPATH=$VLLM_PP" "$VLLM_CONTAINER" \
+  sh -c 'if [ "$VLLM_CUDA_COMPAT" = 1 ] && [ -d /usr/local/cuda/compat ]; then
+    export LD_LIBRARY_PATH=/usr/local/cuda/compat:$LD_LIBRARY_PATH; fi; exec "$@"' sh \
   env VLLM_NO_USAGE_STATS=1 HF_HUB_OFFLINE=1 VLLM_WORKER_MULTIPROC_METHOD=fork "$VLLM_PY" -m vllm.entrypoints.openai.api_server \
   --model "$MODEL" --served-model-name "$SERVED_NAME" --host 127.0.0.1 --port "$VLLM_PORT" \
   --max-model-len "$MAX_MODEL_LEN" --gpu-memory-utilization 0.90 --dtype bfloat16 \
   --data-parallel-size "$DP_SIZE" \
-  --enable-prefix-caching --reasoning-parser qwen3 \
+  --enable-prefix-caching --reasoning-parser qwen3 "${VLLM_EXTRA[@]}" \
   >"$OUT/service-logs/vllm.log" 2>&1 & vllm_pid=$!
 
 # 2. Harbor apptainer bridge (server + worker) for the sandboxes.
