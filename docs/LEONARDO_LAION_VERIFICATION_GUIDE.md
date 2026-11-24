@@ -301,9 +301,9 @@ Do not re-run tasks rejected for `reward=...`: those failures are in the task it
 
 ### What comes next
 
-The tasks are ready for a model. Running a real model on them (and finding the tasks it sometimes solves, which are the useful
-ones for reinforcement learning) is section 5.3 of the [runbook](LEONARDO_LAION_RUNBOOK.md). It needs a downloaded model
-checkpoint and four GPUs.
+The tasks are ready for a model. Running a real model on them, and finding the tasks it sometimes solves (the useful ones for
+reinforcement learning), is the next guide: [LEONARDO_LAION_ROLLOUT_GUIDE.md](LEONARDO_LAION_ROLLOUT_GUIDE.md). It needs a
+downloaded model and four GPUs.
 
 ---
 

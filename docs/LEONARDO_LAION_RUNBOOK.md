@@ -75,12 +75,12 @@ Repo files (this repository):
 | `scripts/leonardo_laion_sif_build_rootless.sbatch` | Builds sandbox images for one dataset or one shard |
 | `scripts/leonardo_laion_validate.sbatch` | Oracle and nop validation, writes `leonardo-compatible.jsonl` |
 | `scripts/leonardo_laion_validate_all.sh` | Validates every task that has an image: chunks, submits, resubmits, merges into one list |
-| `docs/LEONARDO_LAION_IMAGE_BUILD_GUIDE.md`, `docs/LEONARDO_LAION_VERIFICATION_GUIDE.md` | Step-by-step guides for humans: new account to images, images to the usable-task list |
+| `docs/LEONARDO_LAION_IMAGE_BUILD_GUIDE.md`, `docs/LEONARDO_LAION_VERIFICATION_GUIDE.md`, `docs/LEONARDO_LAION_ROLLOUT_GUIDE.md` | Step-by-step guides for humans: new account to images, images to the usable-task list, usable tasks to a model's per-task results |
 | `scripts/summarize_laion_validation.py` | Summarises validation results (keyed on the task directory name) |
 | `scripts/leonardo_laion_agent_rollout.sbatch` | vLLM + Terminus-2 + sandboxes + verifier, writes `rollout-summary.json` |
 | `scripts/leonardo_vllm_container_pull.sbatch` | Pulls the public `vllm/vllm-openai` image into a SIF on an internet node |
 | `scripts/leonardo_vllm_smoke.sbatch` | One-GPU check: driver, CUDA compat, vLLM imports, model loads, one chat reply |
-| `scripts/analyze_rollout.py` | Classifies rollout outcomes (passed, used all turns, stopped early, each error type) |
+| `scripts/analyze_rollout.py` | Classifies rollout outcomes (passed, used all turns, stopped early, each error type); `--groups` sorts tasks into always-pass, mixed, always-fail, no-score |
 | `scripts/leonardo_halu_bench.sbatch` | Hallucination benchmark job (section 5.6) |
 | `src/oellm_rlvr/web_gateway.py`, `scripts/leonardo_web_gateway.sbatch` | Web-search gateway sidecar (section 6). Tested locally, never run on Leonardo |
 | `docs/leonardo-laion-rl-writeup.md` | Narrative status and measured results |
@@ -216,8 +216,8 @@ MODEL=$OELLM_SCRATCH/oellm-rl/models/<model> DP_SIZE=4 N_TASKS=100 ATTEMPTS=4 CO
 
 What it does: starts vLLM (`DP_SIZE` replicas, one per GPU), starts the Harbor bridge server and workers, waits for vLLM (loading 17 GB
 on four GPUs takes about 3 to 10 minutes), then runs Harbor's **Terminus-2** agent on `N_TASKS` shuffled tasks from the validated list,
-and writes `rollout-summary.json` (per-task rewards, exceptions). Run `scripts/analyze_rollout.py <run>/jobs/rollout --max-turns <N>` for a
-breakdown.
+and writes `rollout-summary.json` (per-task rewards, exceptions). Run `scripts/analyze_rollout.py <run>/jobs/rollout --max-turns <N> --groups <run>/task-groups.json` for a
+breakdown and the per-task groups (the `mixed` list is the training input). Step by step: [LEONARDO_LAION_ROLLOUT_GUIDE.md](LEONARDO_LAION_ROLLOUT_GUIDE.md).
 
 Useful variables: `TASK_LIST` (default `laion-validation/<dataset>-leonardo-compatible-all.jsonl` from 5.2), `MAX_TURNS`, `TEMPERATURE` (0.6), `MAX_MODEL_LEN` (32768),
 `MAX_TOKENS_PER_TURN` (4096), `AGENT_TIMEOUT_MULT` (3.0), `EXCLUDE_BASE` (see 7), `STAGING_ROOT` (default `/dev/shm`),
@@ -236,7 +236,11 @@ training candidate. A task with 0 of 4 passes gives no RL signal, and a task tha
 
 - `marianna13/prelude-9b-sft-v2`: Qwen3 architecture, ChatML template with `<think>` and Hermes tool calls. Works in the harness.
   On a second account (vLLM 0.32 container, 19 Nov 2026), 8 tasks x 2 attempts at 30 turns: 16 of 16 scored, 1 passed, 13 used
-  all 30 turns; so give it 100 turns.
+  all 30 turns; so give it 100 turns. The full run (100 tasks x 4 attempts, 100 turns, `SEED=2`, 2 h 56 min): 22 of 359 scored
+  passed (6%, no better than 30 turns); 59% used all 100 turns (many end in Terminus-2's `Technical difficulties` filler, possibly
+  the 32768-token context filling up; unconfirmed), 25% declared done and failed, 41 errors (16 `AgentTimeoutError`, 12 bridge
+  `HTTPError 404`, 8 `tmux: unknown option -- e` from images with an old tmux, 5 `AddTestsDirError`). Tasks: 2 always pass,
+  8 mixed, 88 always fail, 2 no score.
 - `openeurollm/Prelude-Marianna-midtrain-SFT-Excellent-v0.2`: same template family (`chat_template.jinja`), loads and answers
   with separate reasoning. In the harness it declares the task done after about 3 turns (11 of 16 trials), 0 of 12 scored passed,
   and 4 of 16 ended in `AddTestsDirError` (bridge HTTP 409 when adding the tests); same 8 tasks as above.
