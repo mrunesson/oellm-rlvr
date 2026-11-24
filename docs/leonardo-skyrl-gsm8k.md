@@ -9,11 +9,20 @@ Greedy `eval/all/avg_score` on the 1,319 test questions:
 | Step | 0 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 | 110 | 116 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Score | 0.343 | 0.886 | 0.911 | 0.918 | 0.923 | 0.923 | 0.927 | 0.928 | 0.930 | 0.923 | 0.929 | 0.929 | 0.933 |
+| Cut off at 1,024 tokens | 107 | 85 | 412 | 483 | 69 | 0 | 1 | 1 | 2 | 0 | 2 | 2 | 0 |
+| ...of which scored 1 | 6 | 75 | 391 | 461 | 66 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
+| Mean response tokens | 383 | 341 | 540 | 580 | 349 | 306 | 305 | 304 | 302 | 291 | 291 | 284 | 281 |
+
+(`python3 scripts/skyrl_eval_summary.py <run dir>` prints this table.)
+
+**Steps 10-40 repeat themselves.** Around steps 20-30 more than a third of the answers give the right `#### N` and
+then repeat it until the 1,024-token limit; they still score 1 because the reward reads only the first `####`.
+This is gone by step 50. The step-20 and step-40 exports score well but are not usable models; use step 60 or later.
 
 Most of the gain is the answer format. At step 0 only 552 of 1,319 responses contain `####`, so 767 of the 866
 wrong answers give no answer at all, and 107 run to the length limit, often repeating the question. Of the 552
 that do answer, 453 are right (82%). From step 10 on every response has `####`, and nothing runs to the length
-limit by step 116. Accuracy rises from 82% (of the answered subset at step 0) to 93% (of everything at step 116),
+limit from step 50 on. Accuracy rises from 82% (of the answered subset at step 0) to 93% (of everything at step 116),
 so arithmetic also improves, but by far less than the headline jump. Every response ends with `<eos>` (id 2),
 never `<|im_end|>`: both are stop tokens and the reward ignores the ending, so GRPO never taught the turn
 terminator. Stacks that stop only on `<|im_end|>` will run on; a later run could add a reward for it or stop on
@@ -42,6 +51,9 @@ post-training's `build_tokenizer`/`align_generation_eos` do, sets the tokenizer'
 revisions. The template adds no `<bos>`, matching post-training.
 
 ## Run it
+
+For a step-by-step walkthrough with checks and troubleshooting, see
+[LEONARDO_SKYRL_GSM8K_GUIDE.md](LEONARDO_SKYRL_GSM8K_GUIDE.md).
 
 ```bash
 source leonardo.env && cd $OELLM_WORK/oellm-rlvr && mkdir -p logs
