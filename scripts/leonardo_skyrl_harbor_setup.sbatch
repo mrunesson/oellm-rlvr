@@ -1,8 +1,8 @@
 #!/bin/bash
 # One-time setup for SkyRL + Harbor agentic training on CodeContests with Modal sandboxes, on lrd_all_serial
 # (internet). Builds a separate venv from SkyRL v0.3.0's lockfile with the fsdp and harbor extras (so the GSM8K venv
-# is untouched) plus Modal's proxy extra (python-socks, aiohttp-socks), stages the long-context Prelude-base
-# (prelude-base@4eafcf9, 262k positions) with the reason tokenizer and the model's own chat template, extracts
+# is untouched) plus Modal's proxy extra (python-socks, aiohttp-socks), stages the Prelude SFT checkpoint
+# (Prelude-SFT-Propella-Excellent-v0.2@5daebfa, 262k positions) with its own tokenizer and chat template, extracts
 # open-thoughts/CodeContests into Harbor task directories, and, if Modal credentials are present, starts one Modal
 # sandbox from the task image (this also builds and caches the image on Modal). Idempotent; rerun after a failure.
 #   sbatch -A $OELLM_ACCOUNT --export=ALL scripts/leonardo_skyrl_harbor_setup.sbatch
@@ -23,7 +23,7 @@ set -euo pipefail
 : "${SKYRL_ROOT:=$ROOT/sources/SkyRL-v0.3.0}"
 : "${HARBOR_ROOT:=$ROOT/sources/harbor-3de07a0}"
 : "${VENV:=$ROOT/venvs/skyrl-v030-harbor}"
-: "${MODEL:=$ROOT/models/prelude-base-long-reason}"
+: "${MODEL:=$ROOT/models/prelude-sft-propella-v0.2}"
 : "${DATA:=$ROOT/data/harbor/CodeContests}"
 : "${CONTAINER:=$ROOT/containers/vllm-openai-v0.32.0-x86_64-cu129.sif}"
 : "${MODAL_PROBE:=1}"
@@ -34,13 +34,14 @@ set -euo pipefail
 export MODAL_IMAGE_BUILDER_VERSION
 SKYRL_COMMIT=f5bc3b78dfddfb352870d5d7430cd226e5785838   # skyrl-v0.3.0; its lock pins harbor 3de07a0 and modal 1.5.1
 HARBOR_COMMIT=3de07a0e01f3368921766437fc7afece3ddec23d  # must equal the git rev in SkyRL's uv.lock (checked below)
-# "Replace with prelude-long" (2026-11-25): max_position_embeddings 262144, rope_theta 2e7, vocab 262145.
-MODEL_REPO=openeurollm/prelude-base MODEL_REVISION=4eafcf909c431ef4fff6c84e849a58bd4cb99dc1
-# The model repo's own tokenizer has <start_of_turn>/<end_of_turn> in ids 3/4, so its chat template's <|im_start|> and
-# <|im_end|> would be plain text. The reason tokenizer (same merges, max id 262144) has them as ids 3/4.
-TOKENIZER_REPO=openeurollm/tokenizer-256k-reason TOKENIZER_REVISION=baaafeb0375b5fa55fedeef8f5eedce7d4d242dd
+# SFT of prelude-anneal300b-256k-rope20m-cont@47a42eb on Propella-Excellent-SFT (2026-11-26): Qwen3, 262144 positions,
+# rope_theta 2e7, vocab 262145. Tokenizer and chat template are the repo's own (<|im_start|>/<|im_end|> = ids 3/4).
+# Its generation_config lists eos [4, 4, 151645]; 151645 is the text piece "▁Уточ" (a Qwen id), so
+# stage_chat_model.py rewrites the eos list to [4].
+MODEL_REPO=openeurollm/Prelude-SFT-Propella-Excellent-v0.2 MODEL_REVISION=5daebfa0c217444383ddb6403cfd80612e3f4ab8
+TOKENIZER_REPO=$MODEL_REPO TOKENIZER_REVISION=$MODEL_REVISION
 TEMPLATE_URL=https://huggingface.co/$MODEL_REPO/resolve/$MODEL_REVISION/chat_template.jinja   # the model's own
-TEMPLATE_SHA256=a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8
+TEMPLATE_SHA256=826f27fcaab1a8388ced0d321847ba919496309e7efc387bcf41767bdd7e5d80
 DATASET=open-thoughts/CodeContests DATASET_REVISION=11f66f5e81d8035f44c3a576ed6772994d1ed90b   # 9,644 tasks
 
 export PATH=$HOME/.local/bin:$PATH
@@ -99,7 +100,7 @@ if [[ -r $MODEL/config.json ]] && grep -q "\"$MODEL_REVISION\"" "$MODEL/SOURCE.j
    && grep -q "\"$TEMPLATE_SHA256\"" "$MODEL/SOURCE.json"; then
   echo "already staged:"; cat "$MODEL/SOURCE.json"
 else
-  TEMPLATE=$ROOT/cache/prelude-base-${MODEL_REVISION:0:7}-chat_template.jinja
+  TEMPLATE=$ROOT/cache/${MODEL_REPO#*/}-${MODEL_REVISION:0:7}-chat_template.jinja
   [[ -s $TEMPLATE ]] || curl -fsSL -o "$TEMPLATE" "$TEMPLATE_URL"
   echo "$TEMPLATE_SHA256  $TEMPLATE" | sha256sum -c -
   "${IN[@]}" "$VENV/bin/python" "$CONTROL_ROOT/scripts/stage_chat_model.py" \

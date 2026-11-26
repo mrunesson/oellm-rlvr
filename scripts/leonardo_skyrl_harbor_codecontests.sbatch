@@ -1,5 +1,6 @@
 #!/bin/bash
-# SkyRL + Harbor agentic GRPO on open-thoughts/CodeContests for Prelude-base (9B, long-context 4eafcf9) on one Leonardo node (4 x A100 64 GB),
+# SkyRL + Harbor agentic GRPO on open-thoughts/CodeContests from Prelude-SFT-Propella-Excellent-v0.2 (9B, 262k
+# positions, 5daebfa) on one Leonardo node (4 x A100 64 GB),
 # with every Harbor sandbox (agent commands and the verifier) running on Modal. The agent is Harbor's terminus-2; it
 # talks to SkyRL's vLLM engines on this node, and its terminal runs in a Modal sandbox built from the task's
 # Dockerfile. Reward: 1 if /app/solution.py passes the task's tests, else 0. Recipe as upstream run_codecontest.sh
@@ -29,12 +30,12 @@ ulimit -c 0
 : "${ROOT:=$OELLM_SCRATCH/oellm-rl}"
 : "${SKYRL_ROOT:=$ROOT/sources/SkyRL-v0.3.0}"
 : "${VENV:=$ROOT/venvs/skyrl-v030-harbor}"
-: "${MODEL:=$ROOT/models/prelude-base-long-reason}"
+: "${MODEL:=$ROOT/models/prelude-sft-propella-v0.2}"
 : "${DATA:=$ROOT/data/harbor/CodeContests}"
 : "${EVAL_DATA:=}"                       # optional Harbor task directory for evaluation; empty = no evaluation
 : "${CONTAINER:=$ROOT/containers/vllm-openai-v0.32.0-x86_64-cu129.sif}"   # OS only (glibc 2.35)
 : "${PROXY_DIR:=$ROOT/proxy-modal}"
-: "${RUN_NAME:=prelude-base-codecontests-modal}"
+: "${RUN_NAME:=prelude-sft-codecontests-modal}"
 : "${RUN_ROOT:=$ROOT/outputs/skyrl/$RUN_NAME}"
 # Batch: TRAIN_BATCH tasks x N_SAMPLES trials per step, each its own Modal sandbox.
 : "${TRAIN_BATCH:=32}" "${N_SAMPLES:=8}" "${MINI_BATCH:=$TRAIN_BATCH}" "${MAX_STEPS:=}" "${EPOCHS:=1}"
@@ -144,7 +145,7 @@ srun --ntasks=1 "${IN[@]}" "$VENV/bin/python" "$CONTROL_ROOT/scripts/run_harbor_
   trainer.policy.fsdp_config.cpu_offload="$POLICY_CPU_OFFLOAD" \
   trainer.placement.colocate_all=true trainer.placement.policy_num_nodes=1 trainer.placement.ref_num_nodes=1 \
   trainer.placement.policy_num_gpus_per_node=4 trainer.placement.ref_num_gpus_per_node=4 \
-  generator.inference_engine.served_model_name=prelude-base \
+  generator.inference_engine.served_model_name=prelude-sft \
   generator.inference_engine.backend=vllm generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.num_engines=4 generator.inference_engine.tensor_parallel_size=1 \
   generator.inference_engine.weight_sync_backend=nccl generator.inference_engine.enforce_eager="$ENFORCE_EAGER" \

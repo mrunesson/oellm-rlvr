@@ -1,10 +1,16 @@
-# SkyRL + Harbor agentic GRPO on CodeContests for Prelude-base, Leonardo GPUs + Modal sandboxes
+# SkyRL + Harbor agentic GRPO on CodeContests for Prelude SFT, Leonardo GPUs + Modal sandboxes
 
-Status: **scripts written 2026-11-25, not yet run on Leonardo.** Nothing here has been measured; the first run is the
-two-step smoke below. Update this file with what it shows.
+Status: **no completed training step yet.** On 2026-11-26 the smoke runs with `prelude-base@4eafcf9` got the whole
+path working (proxy chain, relay, Modal sandboxes through the proxy, vLLM and the trainer on the R535 driver, weight
+sync, agent turns). None reached a verifier: of the 32 trials in `cc-smoke2`, 16 failed on the Modal workspace's
+spend limit (`ResourceExhaustedError`), 10 on sandboxes Modal stopped when that limit was hit (`NotFoundError`), and 6
+filled the 16k context (`ContextLengthExceededError`). Startup took 16 of the debug queue's 30 minutes, so run the next
+smoke on the normal queue with `--time=01:00:00`. The model then changed to the SFT checkpoint below, which has not
+run yet.
 
-This trains `openeurollm/prelude-base` at `4eafcf9`, the long-context version (9B, Qwen3 architecture, 262,144
-positions; the repo's "Replace with prelude-long" commit of 2026-11-25), with SkyRL's GRPO on
+This trains `openeurollm/Prelude-SFT-Propella-Excellent-v0.2` at `5daebfa` (9B, Qwen3 architecture, 262,144
+positions; `prelude-anneal300b-256k-rope20m-cont@47a42eb` fine-tuned on `Propella-Excellent-SFT` with `/think` and
+`/no_think` conditioning), with its own tokenizer and chat template, with SkyRL's GRPO on
 [`open-thoughts/CodeContests`](https://huggingface.co/datasets/open-thoughts/CodeContests) (9,644 Harbor tasks). The
 learner and vLLM run on one Leonardo booster node (4 x A100 64 GB). Every Harbor sandbox, both the agent's terminal and
 the verifier, runs on [Modal](https://modal.com). The agent is Harbor's `terminus-2`: each turn the model answers with
@@ -49,10 +55,10 @@ shell keystrokes, Harbor runs them in the sandbox and returns the terminal outpu
 | Harbor | `3de07a0` (0.13.1) | the commit SkyRL's lockfile pins. The vLLM image has no `git`, so the setup job clones it with the host's git into `sources/harbor-3de07a0`, runs `uv sync --no-install-package harbor` (still installs Harbor's dependencies, needs no git), and installs Harbor from the clone with `--no-deps` |
 | Modal client | 1.5.1 + `python-socks`, `aiohttp-socks` | the last two are unpinned (`>=2.5`, `>=0.8`, Modal's own extra) |
 | Modal image builder | `2025.06` (`MODAL_IMAGE_BUILDER_VERSION`, set by the jobs) | the newest 1.5.1 supports. The workspace default (`2026.10` on 2026-11-26) fails with `VersionError` (setup job 65280871). The variable applies to this job's image builds only; the workspace setting is unchanged |
-| Weights | `prelude-base@4eafcf9` | `max_position_embeddings` 262144, `rope_theta` 2e7, vocabulary 262,145 rows. Staged to `models/prelude-base-long-reason`; the GSM8K run's `models/prelude-base-reason` (`7ab2bc6`, 4k) is left alone |
-| Tokenizer | `tokenizer-256k-reason@baaafeb` | the model repo's own tokenizer has `<start_of_turn>`/`<end_of_turn>` at ids 3/4, so the template's `<\|im_start\|>`/`<\|im_end\|>` would be split into ordinary text pieces. The reason tokenizer has them at 3/4, with the same merges and max id 262144 (< 262,145 rows); only 16 reserved-slot tokens differ |
-| Chat template | the model's own `chat_template.jinja` at `4eafcf9` (sha256 `a55ee1b1…`) | Qwen3-style. Compared with post-training's `qwen3.jinja` it has no `thinking_instruction` and no `{% generation %}` markers; neither is used here |
-| Generation eos | `[4, 2]` (`<\|im_end\|>`, `<eos>`), written by `stage_chat_model.py` | the repo's `generation_config.json` lists 151643/151645, apparently left over from a Qwen config; they are not Prelude's end tokens, so staging replaces them |
+| Weights | `Prelude-SFT-Propella-Excellent-v0.2@5daebfa` | one 18 GB `model.safetensors`; `max_position_embeddings` 262144, `rope_theta` 2e7, vocabulary 262,145 rows. Staged to `models/prelude-sft-propella-v0.2`; the earlier `models/prelude-base-long-reason` is left alone |
+| Tokenizer | the model repo's own, same revision | 262,145 tokens; `<\|im_start\|>`/`<\|im_end\|>` at ids 3/4, eos `<\|im_end\|>`, pad 262144 |
+| Chat template | the model's own `chat_template.jinja` at `5daebfa` (sha256 `826f27fc…`) | post-training's Qwen3 template with `thinking_instruction` (`think`/`no_think`, appended to the system prompt as `/think`/`/no_think`) and `{% generation %}` markers. Neither is set here, so the model decides whether to think. It raises an error on a finished assistant turn without reasoning when rendered without a generation prompt; vLLM always renders with one, and staging's probe includes a `<think>` block |
+| Generation eos | `[4]` (`<\|im_end\|>`), written by `stage_chat_model.py` | the repo's `generation_config.json` lists `[4, 4, 151645]`; 151645 is the text piece `▁Уточ` (a Qwen id), which would stop generation mid-text, so staging drops it |
 | Dataset | `open-thoughts/CodeContests@11f66f5` | 9,644 tasks, all with the same Dockerfile (Ubuntu 24.04 + python3), so Modal builds one image |
 | OS | `vllm-openai-v0.32.0-x86_64-cu129.sif` | for glibc 2.35, as in the GSM8K run |
 
@@ -65,7 +71,7 @@ cd $OELLM_WORK/oellm-rlvr && mkdir -p logs
 # 0. Modal credentials, once: write ~/.modal.toml yourself (keep it private), e.g.
 #      printf '[default]\ntoken_id = "%s"\ntoken_secret = "%s"\nactive = true\n' <id> <secret> > ~/.modal.toml
 #      chmod 600 ~/.modal.toml
-# 1. once: harbor venv, the long-context model staged with the reason tokenizer, CodeContests tasks, and a Modal probe that
+# 1. once: harbor venv, the SFT model with its own tokenizer and template, CodeContests tasks, and a Modal probe that
 #    also builds the task image on Modal (lrd_all_serial; needs uv in ~/.local/bin and the vLLM image)
 sbatch -A $OELLM_ACCOUNT --export=ALL scripts/leonardo_skyrl_harbor_setup.sbatch
 # 2. start the proxy chain (keeps itself alive while a skyrl-cc-modal job is queued or running)
@@ -96,20 +102,21 @@ Each sandbox gets 1 CPU, 2 GB memory and 4 GB disk, lives at most 1 h, and stops
 trials run at once, at most 5 new trials per second. Checkpoints every 10 steps, HF exports every 20. No evaluation by
 default; set `EVAL_DATA` to a Harbor task directory to add one.
 
-Differences from upstream: Qwen3-8B on 8 GPUs with a 32k context there; Prelude-base on 4 GPUs with 16k here. The
-chat template is the model's own, not SkyRL's `qwen3_acc_thinking`. That is fine for
-merging because terminus-2's history has no `<think>` blocks, so the template does not rewrite earlier turns.
+Differences from upstream: Qwen3-8B on 8 GPUs with a 32k context there; Prelude SFT on 4 GPUs with 16k here. The
+chat template is the model's own, not SkyRL's `qwen3_acc_thinking`. It drops `<think>` blocks from earlier assistant
+turns, so when the model thinks, a turn's prompt no longer starts with the previous turn's tokens. Those turns are then
+not merged and each becomes its own training sequence: correct, but more learner work per step than upstream.
 
 ## Things to check in the smoke before a long run
 
-- **Does Prelude-base produce any reward?** This is the main risk. Prelude-base is a base model that has not been
-  trained on chat turns, and terminus-2 expects a JSON reply with keystrokes on every turn. On LUMI the 9B SFT
-  checkpoint already failed this interface (all rewards 0, many parser errors; see
-  `qualification-harbor-training-2026-09-08.md`). If every group is all-0, GRPO has no signal and the run burns GPU
-  hours and Modal credit for nothing. This version has a chat template, but whether it was trained on chat turns is
-  not stated in the repo; the smoke will show. Count rewards in `trials/*/result.json` and parser errors in the agent logs.
-  If they are all 0, consider a run on a few hundred tasks with `N_SAMPLES=16` to find any mixed groups, or move to
-  an SFT checkpoint.
+- **Does the SFT model produce any reward?** This is the main risk. Terminus-2 expects a JSON reply with keystrokes
+  on every turn, and on LUMI an earlier 9B SFT checkpoint failed this interface (all rewards 0, many parser errors;
+  see `qualification-harbor-training-2026-09-08.md`). If every group is all-0, GRPO has no signal and the run burns
+  GPU hours and Modal credit for nothing. Count rewards in `trials/*/result.json` and parser errors in the agent logs.
+  If they are all 0, consider a run on a few hundred tasks with `N_SAMPLES=16` to find any mixed groups.
+- **Thinking length.** With no `/think` or `/no_think` the model picks a mode itself. Long reasoning per turn uses up
+  the 4,096-token turn cap and the 16k context; the `prelude-base` smoke already had 6 of 32 trials fill the context.
+  Check how often turns hit the cap and trials end in `ContextLengthExceededError`.
 - **Context and learner memory.** The model takes 262k positions, so `MAX_MODEL_LEN` is limited by memory, not
   the model. The default is 16,384; upstream's 32,768 is worth trying once a 16k step fits. The largest cost is the
   full-vocabulary logits: 262,145 values per token, about 8.6 GB in bf16 per 16k sequence, before activations.

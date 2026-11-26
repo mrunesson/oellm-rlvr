@@ -27,7 +27,8 @@ TOKENIZER_PATTERNS = ["tokenizer.json", "tokenizer_config.json", "special_tokens
 
 def end_token_of(tokenizer) -> str | None:
     """The added token a rendered conversation ends on (post-training's infer_end_token_from_render)."""
-    probe = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+    # The answer carries a reasoning block: some templates (Prelude SFT's) refuse a finished assistant turn without one.
+    probe = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "<think>\nr\n</think>\n\na"}]
     tail = tokenizer.apply_chat_template(probe, tokenize=False).rstrip("\n")
     matches = [token for token in tokenizer.get_added_vocab() if token and tail.endswith(token)]
     return max(matches, key=len) if matches else None
