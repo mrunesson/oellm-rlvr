@@ -27,6 +27,11 @@ set -euo pipefail
 : "${DATA:=$ROOT/data/harbor/CodeContests}"
 : "${CONTAINER:=$ROOT/containers/vllm-openai-v0.32.0-x86_64-cu129.sif}"
 : "${MODAL_PROBE:=1}"
+# Modal 1.5.1 (SkyRL's pin) knows image builders up to 2025.06; a workspace set to a newer one (2026.10 seen on
+# 2026-11-26) makes every image build fail with VersionError. This asks for 2025.06 for this job's images only; the
+# workspace setting is unchanged.
+: "${MODAL_IMAGE_BUILDER_VERSION:=2025.06}"
+export MODAL_IMAGE_BUILDER_VERSION
 SKYRL_COMMIT=f5bc3b78dfddfb352870d5d7430cd226e5785838   # skyrl-v0.3.0; its lock pins harbor 3de07a0 and modal 1.5.1
 HARBOR_COMMIT=3de07a0e01f3368921766437fc7afece3ddec23d  # must equal the git rev in SkyRL's uv.lock (checked below)
 # "Replace with prelude-long" (2026-11-25): max_position_embeddings 262144, rope_theta 2e7, vocab 262145.

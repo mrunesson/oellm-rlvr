@@ -48,6 +48,11 @@ ulimit -c 0
 : "${GPU_MEMORY_UTILIZATION:=0.6}" "${ENFORCE_EAGER:=false}" "${FLASH_ATTN:=true}" "${POLICY_CPU_OFFLOAD:=false}"
 : "${CKPT_INTERVAL:=10}" "${HF_SAVE_INTERVAL:=20}" "${EVAL_INTERVAL:=20}" "${LOGGER:=console}"
 : "${MODAL_PREFLIGHT:=1}"
+# Modal 1.5.1 (SkyRL's pin) knows image builders up to 2025.06; a workspace set to a newer one (2026.10 seen on
+# 2026-11-26) makes every image build fail with VersionError. This asks for 2025.06 for this job's images only; the
+# workspace setting is unchanged.
+: "${MODAL_IMAGE_BUILDER_VERSION:=2025.06}"
+export MODAL_IMAGE_BUILDER_VERSION
 [[ -r $MODEL/config.json && -r $MODEL/SOURCE.json ]] || { echo "no staged model at $MODEL (run the setup job)" >&2; exit 1; }
 [[ -r $DATA/code_contests-0000/instruction.md ]] || { echo "no CodeContests tasks in $DATA (run the setup job)" >&2; exit 1; }
 [[ -x $VENV/bin/python ]] || { echo "no venv at $VENV (run the setup job)" >&2; exit 1; }
