@@ -144,9 +144,10 @@ for f in $OELLM_SCRATCH/oellm-rl/sif-shards/rts-1k-rootless-apptainer/shard-*; d
 done
 ```
 
-4. Build jobs read the proxy address once at start (the loopback relay in `local_relay.py` reads it when the job starts).
-   **If the proxy expires first, restart a proxy, rerun step 2, then resubmit the shards.** Finished images are skipped, so no work
-   is lost. Each job uses its own singularity cache under `apptainer-cache/<jobid>`, deleted when the job exits.
+4. The loopback relay in `local_relay.py` re-reads `proxy.host` on every new connection (since 25 November 2026; before that it
+   read it once at job start), so a proxy restarted into the same `$PROXY_DIR` is picked up by running build jobs. Builds that
+   were mid-download when the old proxy exited still fail. **If the proxy expires first, restart a proxy, rerun step 2, then
+   resubmit the shards.** Finished images are skipped, so no work is lost. Each job uses its own singularity cache under `apptainer-cache/<jobid>`, deleted when the job exits.
 5. Image failures about 13 % are expected (npm `@jsr/...` 404s and similar). `glibc` images only; alpine/musl images do not work with the shim.
 
 ### 5.2 Validate tasks

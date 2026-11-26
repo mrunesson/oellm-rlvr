@@ -6,7 +6,9 @@ stays here instead of in every tool's environment.
   local_relay.py UPSTREAM_HOSTFILE TOKENFILE PORTFILE [MAX_SECONDS]
 
 Binds 127.0.0.1 on a free port (written to PORTFILE). Only connections from the same uid are served: the peer's uid is read
-from /proc/net/tcp(6), because other users share the node's loopback."""
+from /proc/net/tcp(6), because other users share the node's loopback. UPSTREAM_HOSTFILE is read again for every new
+connection, so a restarted proxy (new host:port in the same file) is picked up without restarting the relay; if the file
+is empty or unreadable the last good address is used."""
 import asyncio, base64, os, sys
 
 UID = os.getuid()
@@ -36,7 +38,15 @@ async def pipe(r, w):
         try: w.close()
         except Exception: pass
 
-def make_handler(upstream, auth):
+def read_upstream(hostfile, last):
+    try:
+        host, _, port = open(hostfile).read().strip().rpartition(":")
+        return (host, int(port)) if host else last
+    except (OSError, ValueError):
+        return last
+
+def make_handler(hostfile, auth):
+    upstream = [read_upstream(hostfile, None)]
     async def handle(cr, cw):
         try:
             if peer_uid(cw.get_extra_info("peername")[1]) != UID:
@@ -45,7 +55,8 @@ def make_handler(upstream, auth):
             lines = head.split(b"\r\n")
             lines = [l for l in lines if not l.lower().startswith(b"proxy-authorization")]
             lines.insert(1, b"Proxy-Authorization: " + auth)
-            host, port = upstream
+            upstream[0] = read_upstream(hostfile, upstream[0])
+            host, port = upstream[0]
             ur, uw = await asyncio.open_connection(host, port)
             uw.write(b"\r\n".join(lines)); await uw.drain()
             await asyncio.gather(pipe(cr, uw), pipe(ur, cw))   # CONNECT 200 and plain responses flow back unchanged
@@ -55,10 +66,11 @@ def make_handler(upstream, auth):
     return handle
 
 async def main(hostfile, tokenfile, portfile, max_s):
-    host, _, port = open(hostfile).read().strip().rpartition(":")
+    if read_upstream(hostfile, None) is None:
+        raise SystemExit("no proxy address in %s" % hostfile)
     token = open(tokenfile).read().strip()
     auth = b"Basic " + base64.b64encode(("build:%s" % token).encode())
-    srv = await asyncio.start_server(make_handler((host, int(port)), auth), "127.0.0.1", 0)
+    srv = await asyncio.start_server(make_handler(hostfile, auth), "127.0.0.1", 0)
     open(portfile, "w").write(str(srv.sockets[0].getsockname()[1]))
     async with srv:
         try: await asyncio.wait_for(srv.serve_forever(), max_s)

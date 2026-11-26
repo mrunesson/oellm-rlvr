@@ -62,7 +62,9 @@ async def main(port, hostfile, tokenfile, max_s):
     TOKEN = open(tokenfile).read().strip()
     srv = await asyncio.start_server(handle, "0.0.0.0", port)
     p = srv.sockets[0].getsockname()[1]
-    open(hostfile, "w").write(f"{socket.gethostname()}:{p}\n")
+    with open(hostfile + ".tmp", "w") as f:   # atomic: relays re-read this file while it is replaced
+        f.write(f"{socket.gethostname()}:{p}\n")
+    os.replace(hostfile + ".tmp", hostfile)
     print(f"proxy on {socket.gethostname()}:{p}, exits in {max_s}s", flush=True)
     async with srv:
         try: await asyncio.wait_for(srv.serve_forever(), max_s)

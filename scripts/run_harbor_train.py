@@ -4,6 +4,8 @@ SkyRL's upstream Harbor learner is used without changing its optimization
 logic.  This thin entrypoint only records the inference client's monotonic
 weight version before every rollout batch so a qualification run can prove
 that a later batch was sampled after an optimizer update and weight sync.
+With ``OELLM_MODAL_PROXY`` set it also routes the Modal client (Harbor's
+``modal`` environment) through that proxy; see ``oellm_rlvr.modal_proxy``.
 """
 
 from __future__ import annotations
@@ -53,6 +55,13 @@ class VersionedHarborExp(HarborExp):
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: HarborSkyRLConfig) -> None:
+    # Harbor trials (and so the Modal client) run in this worker. With OELLM_MODAL_PROXY set, Modal alone goes
+    # through that proxy (offline compute nodes); Ray, vLLM and LiteLLM keep their direct node-local connections.
+    from oellm_rlvr.modal_proxy import install_modal_proxy
+
+    proxy = install_modal_proxy()
+    if proxy:
+        print(f"OELLM_MODAL_PROXY active: {proxy}", flush=True)
     VersionedHarborExp(cfg).run()
 
 
