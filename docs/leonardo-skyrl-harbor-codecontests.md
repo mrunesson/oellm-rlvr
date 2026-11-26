@@ -36,6 +36,10 @@ shell keystrokes, Harbor runs them in the sandbox and returns the terminal outpu
   loss-masked, not scored 0. Expect a few masked trials
   every 3.5 h (`generate/num_masked_instances`).
 - The chain stops itself when no `skyrl-cc-modal` job is pending or running, or when `$PROXY_DIR/STOP` exists.
+- `lrd_all_serial` limits per user (QOS `lrd_all_serial`, checked 2026-11-26): 2 running and 10 submitted jobs,
+  8 CPUs and 30.8 GB of memory in total, 4 h. Two overlapping proxies (2 CPUs, 4 GB each) fit. A setup job (30 GB)
+  does not fit beside a running proxy and waits until it ends. If the successor cannot be submitted, the proxy keeps
+  serving until its own end and logs a warning.
 
 ## What is pinned
 

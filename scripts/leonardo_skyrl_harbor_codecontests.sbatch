@@ -58,8 +58,10 @@ export MODAL_IMAGE_BUILDER_VERSION
 [[ -x $VENV/bin/python ]] || { echo "no venv at $VENV (run the setup job)" >&2; exit 1; }
 [[ -r $CONTAINER ]] || { echo "no container at $CONTAINER" >&2; exit 1; }
 [[ -r $HOME/.modal.toml || -n ${MODAL_TOKEN_ID:-} ]] || { echo "no Modal credentials (~/.modal.toml or MODAL_TOKEN_ID)" >&2; exit 1; }
+# With --dependency=after:<proxy job> this job can start a few seconds before the proxy has written its address.
+for _ in $(seq "${PROXY_WAIT:=600}"); do [[ -s $PROXY_DIR/proxy.host && -r $PROXY_DIR/proxy.token ]] && break; sleep 1; done
 [[ -s $PROXY_DIR/proxy.host && -r $PROXY_DIR/proxy.token ]] || {
-  echo "no proxy in $PROXY_DIR: sbatch scripts/leonardo_modal_proxy.sbatch first" >&2; exit 1; }
+  echo "no proxy in $PROXY_DIR after ${PROXY_WAIT}s: sbatch scripts/leonardo_modal_proxy.sbatch first" >&2; exit 1; }
 mkdir -p logs "$RUN_ROOT"/{checkpoints,exports,logs,ray,trials,manifests}
 cat "$MODEL/SOURCE.json"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv

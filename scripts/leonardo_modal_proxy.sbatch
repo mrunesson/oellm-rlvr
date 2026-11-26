@@ -31,9 +31,13 @@ if (( PROXY_GEN > 1 )) && [[ -n $WATCH_JOB_NAME ]] && [[ -z $(squeue -h -u "$USE
 fi
 if [[ $CHAIN == 1 ]]; then
   BEGIN_MIN=$(( PROXY_SECONDS / 60 - PROXY_OVERLAP_MIN ))
-  NEXT=$(cd "$CONTROL_ROOT" && sbatch --parsable -A "$SLURM_JOB_ACCOUNT" --begin="now+${BEGIN_MIN}minutes" \
-    --export=ALL,PROXY_GEN=$((PROXY_GEN + 1)),CONTROL_ROOT="$CONTROL_ROOT" scripts/leonardo_modal_proxy.sbatch)
-  echo "generation $PROXY_GEN; successor $NEXT starts in $BEGIN_MIN min"
+  # A refused submission (e.g. a per-user job limit on lrd_all_serial) must not stop this proxy from serving.
+  if NEXT=$(cd "$CONTROL_ROOT" && sbatch --parsable -A "$SLURM_JOB_ACCOUNT" --begin="now+${BEGIN_MIN}minutes" \
+      --export=ALL,PROXY_GEN=$((PROXY_GEN + 1)),CONTROL_ROOT="$CONTROL_ROOT" scripts/leonardo_modal_proxy.sbatch 2>&1); then
+    echo "generation $PROXY_GEN; successor $NEXT starts in $BEGIN_MIN min"
+  else
+    echo "WARNING: generation $PROXY_GEN could not submit its successor ($NEXT); the chain ends with this proxy" >&2
+  fi
 fi
 singularity exec -B /leonardo_work,/leonardo_scratch "$CONTAINER" env -u PYTHONPATH "$VENV/bin/python" -I \
   "$CONTROL_ROOT/scripts/laion_proxy.py" 0 "$PROXY_DIR/proxy.host" "$PROXY_DIR/proxy.token" "$PROXY_SECONDS"
