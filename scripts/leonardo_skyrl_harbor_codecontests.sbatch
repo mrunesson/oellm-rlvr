@@ -44,6 +44,13 @@ ulimit -c 0
 # full-vocabulary logits alone are 262145 x MAX_MODEL_LEN values per sequence.
 : "${MAX_MODEL_LEN:=16384}" "${MAX_TOKENS_PER_TURN:=4096}" "${MAX_TURNS:=32}" "${AGENT_TIMEOUT:=1200}"
 : "${MAX_CONCURRENCY:=128}" "${TRAJECTORIES_PER_SECOND:=5}"
+# Reasoning mode of the SFT model's chat template: think (the template appends "/think" to the system prompt, and the
+# model reasons in <think>...</think> before each answer), no_think, or auto (no instruction; the model chooses).
+# Applied to every request through vLLM's default_chat_template_kwargs. With think, vLLM's qwen3 reasoning parser (<think>
+# and </think> are single tokens, ids 18/17) moves the reasoning into reasoning_content, so terminus-2 parses its JSON
+# from the answer alone: its parser takes the first top-level "{" of the reply, which could be in the reasoning. The
+# token ids SkyRL trains on are vLLM's raw output, reasoning included. A turn cut off before </think> has no answer.
+: "${THINKING:=think}"
 : "${SANDBOX_CPUS:=1}" "${SANDBOX_MEMORY_MB:=2048}" "${SANDBOX_STORAGE_MB:=4096}"
 : "${SANDBOX_TIMEOUT:=3600}" "${SANDBOX_IDLE_TIMEOUT:=1200}"   # so sandboxes die if this job does
 : "${GPU_MEMORY_UTILIZATION:=0.6}" "${ENFORCE_EAGER:=false}" "${FLASH_ATTN:=true}" "${POLICY_CPU_OFFLOAD:=false}"
@@ -54,6 +61,13 @@ ulimit -c 0
 # workspace setting is unchanged.
 : "${MODAL_IMAGE_BUILDER_VERSION:=2025.06}"
 export MODAL_IMAGE_BUILDER_VERSION
+case $THINKING in
+  think) THINKING_ARGS=("generator.inference_engine.engine_init_kwargs.default_chat_template_kwargs.thinking_instruction=think"
+                        generator.inference_engine.engine_init_kwargs.reasoning_parser=qwen3) ;;
+  no_think) THINKING_ARGS=("generator.inference_engine.engine_init_kwargs.default_chat_template_kwargs.thinking_instruction=no_think") ;;
+  auto) THINKING_ARGS=() ;;
+  *) echo "THINKING must be think, no_think or auto, not '$THINKING'" >&2; exit 1 ;;
+esac
 [[ -r $MODEL/config.json && -r $MODEL/SOURCE.json ]] || { echo "no staged model at $MODEL (run the setup job)" >&2; exit 1; }
 [[ -r $DATA/code_contests-0000/instruction.md ]] || { echo "no CodeContests tasks in $DATA (run the setup job)" >&2; exit 1; }
 [[ -x $VENV/bin/python ]] || { echo "no venv at $VENV (run the setup job)" >&2; exit 1; }
@@ -105,6 +119,7 @@ echo "modal proxy: $OELLM_MODAL_PROXY -> $(cat "$PROXY_DIR/proxy.host")"
 git -C "$CONTROL_ROOT" rev-parse HEAD > "$RUN_ROOT/manifests/oellm-rlvr.commit" 2>/dev/null || true
 git -C "$SKYRL_ROOT" rev-parse HEAD > "$RUN_ROOT/manifests/skyrl.commit"
 cp "$MODEL/SOURCE.json" "$RUN_ROOT/manifests/model-SOURCE.json"
+echo "$THINKING" > "$RUN_ROOT/manifests/thinking-$SLURM_JOB_ID.txt"
 cat "$(dirname "$DATA")/CodeContests.SOURCE" > "$RUN_ROOT/manifests/data-SOURCE.txt" 2>/dev/null || true
 "${IN[@]}" "$VENV/bin/python" -c 'import ctypes, torch, harbor, modal; l = ctypes.CDLL("libcuda.so.1"); v = ctypes.c_int()
 l.cuDriverGetVersion(ctypes.byref(v)); print("cuDriverGetVersion", v.value, "torch", torch.__version__, "gpus",
@@ -151,7 +166,7 @@ srun --ntasks=1 "${IN[@]}" "$VENV/bin/python" "$CONTROL_ROOT/scripts/run_harbor_
   generator.inference_engine.weight_sync_backend=nccl generator.inference_engine.enforce_eager="$ENFORCE_EAGER" \
   generator.inference_engine.gpu_memory_utilization="$GPU_MEMORY_UTILIZATION" \
   generator.inference_engine.engine_init_kwargs.max_model_len="$MAX_MODEL_LEN" \
-  generator.inference_engine.engine_init_kwargs.enable_log_requests=false \
+  generator.inference_engine.engine_init_kwargs.enable_log_requests=false "${THINKING_ARGS[@]}" \
   generator.batched=false generator.n_samples_per_prompt="$N_SAMPLES" \
   generator.step_wise_trajectories=true generator.merge_stepwise_output=true \
   generator.apply_overlong_filtering=true \

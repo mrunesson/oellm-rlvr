@@ -57,7 +57,7 @@ shell keystrokes, Harbor runs them in the sandbox and returns the terminal outpu
 | Modal image builder | `2025.06` (`MODAL_IMAGE_BUILDER_VERSION`, set by the jobs) | the newest 1.5.1 supports. The workspace default (`2026.10` on 2026-11-26) fails with `VersionError` (setup job 65280871). The variable applies to this job's image builds only; the workspace setting is unchanged |
 | Weights | `Prelude-SFT-Propella-Excellent-v0.2@5daebfa` | one 18 GB `model.safetensors`; `max_position_embeddings` 262144, `rope_theta` 2e7, vocabulary 262,145 rows. Staged to `models/prelude-sft-propella-v0.2`; the earlier `models/prelude-base-long-reason` is left alone |
 | Tokenizer | the model repo's own, same revision | 262,145 tokens; `<\|im_start\|>`/`<\|im_end\|>` at ids 3/4, eos `<\|im_end\|>`, pad 262144 |
-| Chat template | the model's own `chat_template.jinja` at `5daebfa` (sha256 `826f27fc…`) | post-training's Qwen3 template with `thinking_instruction` (`think`/`no_think`, appended to the system prompt as `/think`/`/no_think`) and `{% generation %}` markers. Neither is set here, so the model decides whether to think. It raises an error on a finished assistant turn without reasoning when rendered without a generation prompt; vLLM always renders with one, and staging's probe includes a `<think>` block |
+| Chat template | the model's own `chat_template.jinja` at `5daebfa` (sha256 `826f27fc…`) | post-training's Qwen3 template with `thinking_instruction` (`think`/`no_think`, appended to the system prompt as `/think`/`/no_think`) and `{% generation %}` markers. Training sets `thinking_instruction=think` (see Recipe). It raises an error on a finished assistant turn without reasoning when rendered without a generation prompt; vLLM always renders with one, and staging's probe includes a `<think>` block |
 | Generation eos | `[4]` (`<\|im_end\|>`), written by `stage_chat_model.py` | the repo's `generation_config.json` lists `[4, 4, 151645]`; 151645 is the text piece `▁Уточ` (a Qwen id), which would stop generation mid-text, so staging drops it |
 | Dataset | `open-thoughts/CodeContests@11f66f5` | 9,644 tasks, all with the same Dockerfile (Ubuntu 24.04 + python3), so Modal builds one image |
 | OS | `vllm-openai-v0.32.0-x86_64-cu129.sif` | for glibc 2.35, as in the GSM8K run |
@@ -97,6 +97,12 @@ of `leonardo_skyrl_harbor_codecontests.sbatch`.
 As upstream `examples/train_integrations/harbor/run_codecontest.sh`, sized for one node: colocated FSDP2 policy and
 four vLLM engines (TP 1, 60% GPU memory), GRPO without std normalisation, token-mean loss, no KL, token-level TIS
 (cap 2), overlong filtering, step-wise trajectories merged where the prefix matches, lr 1e-6, temperature 1.0.
+Reasoning is on: `THINKING=think` (default) passes `thinking_instruction=think` to every request through vLLM's
+`default_chat_template_kwargs`, so the system prompt ends in `/think` and the model reasons in `<think>…</think>`
+before each answer (`THINKING=no_think` or `auto` to change it; recorded in `manifests/thinking-<job>.txt`). With
+`think`, vLLM's `qwen3` reasoning parser moves the reasoning into `reasoning_content`, because terminus-2's JSON
+parser takes the first top-level `{` of the reply, which could be inside the reasoning. SkyRL still trains on vLLM's
+raw output tokens, reasoning included.
 Terminus-2 gets up to 32 turns of at most 4,096 tokens each, within a 16,384-token context, and 1,200 s per trial.
 Each sandbox gets 1 CPU, 2 GB memory and 4 GB disk, lives at most 1 h, and stops after 20 idle minutes. Up to 128
 trials run at once, at most 5 new trials per second. Checkpoints every 10 steps, HF exports every 20. No evaluation by
@@ -114,9 +120,10 @@ not merged and each becomes its own training sequence: correct, but more learner
   see `qualification-harbor-training-2026-09-08.md`). If every group is all-0, GRPO has no signal and the run burns
   GPU hours and Modal credit for nothing. Count rewards in `trials/*/result.json` and parser errors in the agent logs.
   If they are all 0, consider a run on a few hundred tasks with `N_SAMPLES=16` to find any mixed groups.
-- **Thinking length.** With no `/think` or `/no_think` the model picks a mode itself. Long reasoning per turn uses up
-  the 4,096-token turn cap and the 16k context; the `prelude-base` smoke already had 6 of 32 trials fill the context.
-  Check how often turns hit the cap and trials end in `ContextLengthExceededError`.
+- **Thinking length.** With `/think` every turn starts with reasoning, which uses up the 4,096-token turn cap and
+  the 16k context faster; the `prelude-base` smoke already had 6 of 32 trials fill the context. A turn cut off inside
+  `<think>` has no keystrokes. Check how often turns hit the cap and trials end in `ContextLengthExceededError`; if
+  often, raise `MAX_TOKENS_PER_TURN` and `MAX_MODEL_LEN` (learner memory permitting) before the long run.
 - **Context and learner memory.** The model takes 262k positions, so `MAX_MODEL_LEN` is limited by memory, not
   the model. The default is 16,384; upstream's 32,768 is worth trying once a 16k step fits. The largest cost is the
   full-vocabulary logits: 262,145 values per token, about 8.6 GB in bf16 per 16k sequence, before activations.
