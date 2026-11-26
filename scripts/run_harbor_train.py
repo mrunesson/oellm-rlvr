@@ -53,15 +53,23 @@ class VersionedHarborExp(HarborExp):
         )
 
 
+# Passed to the worker explicitly: SkyRL's ray.init forwards only a fixed list of variables in its runtime env.
+FORWARDED_ENV = ("OELLM_MODAL_PROXY", "MODAL_IMAGE_BUILDER_VERSION")
+
+
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: HarborSkyRLConfig) -> None:
+def skyrl_entrypoint(cfg: HarborSkyRLConfig, env: dict[str, str] | None = None) -> None:
     # Harbor trials (and so the Modal client) run in this worker. With OELLM_MODAL_PROXY set, Modal alone goes
     # through that proxy (offline compute nodes); Ray, vLLM and LiteLLM keep their direct node-local connections.
+    import os
+
     from oellm_rlvr.modal_proxy import install_modal_proxy
 
+    os.environ.update(env or {})
+    print(f"OELLM_HARBOR_WORKER_ENV {sorted(env or {})}", flush=True)
     proxy = install_modal_proxy()
-    if proxy:
-        print(f"OELLM_MODAL_PROXY active: {proxy}", flush=True)
+    print(f"OELLM_MODAL_PROXY active: {proxy}" if proxy else "OELLM_MODAL_PROXY not set: Modal connects directly",
+          flush=True)
     VersionedHarborExp(cfg).run()
 
 
@@ -79,7 +87,10 @@ def main(argv: list[str] | None = None) -> None:
             "it is required to truncate responses to the maximum allowed length."
         )
     initialize_ray(cfg)
-    ray.get(skyrl_entrypoint.remote(cfg))
+    import os
+
+    env = {name: os.environ[name] for name in FORWARDED_ENV if os.environ.get(name)}
+    ray.get(skyrl_entrypoint.remote(cfg, env))
 
 
 if __name__ == "__main__":
