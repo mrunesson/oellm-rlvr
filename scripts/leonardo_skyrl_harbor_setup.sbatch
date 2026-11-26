@@ -21,12 +21,14 @@ set -euo pipefail
 : "${CONTROL_ROOT:=${SLURM_SUBMIT_DIR:-$PWD}}"
 : "${ROOT:=$OELLM_SCRATCH/oellm-rl}"
 : "${SKYRL_ROOT:=$ROOT/sources/SkyRL-v0.3.0}"
+: "${HARBOR_ROOT:=$ROOT/sources/harbor-3de07a0}"
 : "${VENV:=$ROOT/venvs/skyrl-v030-harbor}"
 : "${MODEL:=$ROOT/models/prelude-base-long-reason}"
 : "${DATA:=$ROOT/data/harbor/CodeContests}"
 : "${CONTAINER:=$ROOT/containers/vllm-openai-v0.32.0-x86_64-cu129.sif}"
 : "${MODAL_PROBE:=1}"
 SKYRL_COMMIT=f5bc3b78dfddfb352870d5d7430cd226e5785838   # skyrl-v0.3.0; its lock pins harbor 3de07a0 and modal 1.5.1
+HARBOR_COMMIT=3de07a0e01f3368921766437fc7afece3ddec23d  # must equal the git rev in SkyRL's uv.lock (checked below)
 # "Replace with prelude-long" (2026-11-25): max_position_embeddings 262144, rope_theta 2e7, vocab 262145.
 MODEL_REPO=openeurollm/prelude-base MODEL_REVISION=4eafcf909c431ef4fff6c84e849a58bd4cb99dc1
 # The model repo's own tokenizer has <start_of_turn>/<end_of_turn> in ids 3/4, so its chat template's <|im_start|> and
@@ -43,8 +45,6 @@ export UV_CACHE_DIR=$ROOT/cache/uv UV_PYTHON_INSTALL_DIR=$ROOT/cache/uv-python H
 mkdir -p logs "$(dirname "$SKYRL_ROOT")" "$(dirname "$VENV")" "$(dirname "$DATA")" "$UV_CACHE_DIR"
 IN=(singularity exec -B /leonardo_work,/leonardo_scratch "$CONTAINER" env -u PYTHONPATH -u VIRTUAL_ENV)
 "${IN[@]}" ldd --version | head -1
-# uv needs git for Harbor's locked git source.
-"${IN[@]}" git --version || { echo "no git in $CONTAINER; uv cannot fetch Harbor's git source" >&2; exit 1; }
 
 echo "=== 1. SkyRL $SKYRL_COMMIT -> $SKYRL_ROOT"
 [[ -d $SKYRL_ROOT/.git ]] || git clone --filter=blob:none https://github.com/NovaSky-AI/SkyRL.git "$SKYRL_ROOT"
@@ -52,13 +52,25 @@ git -C "$SKYRL_ROOT" fetch --depth 1 origin "$SKYRL_COMMIT"
 git -C "$SKYRL_ROOT" -c advice.detachedHead=false checkout --detach "$SKYRL_COMMIT"
 [[ $(git -C "$SKYRL_ROOT" rev-parse HEAD) == "$SKYRL_COMMIT" ]]
 
+# Harbor is a git source in SkyRL's lockfile, and the container has no git for uv to fetch it. So the host's git
+# clones it at the locked commit, uv sync skips it (--no-install-package harbor; that path needs no git), and it is
+# installed from this clone with --no-deps below (its dependencies come from the lockfile through the harbor extra).
+grep -q "harbor?rev=$HARBOR_COMMIT#" "$SKYRL_ROOT/uv.lock" || { echo "SkyRL's uv.lock does not pin harbor $HARBOR_COMMIT" >&2; exit 1; }
+echo "=== 1b. Harbor $HARBOR_COMMIT -> $HARBOR_ROOT"
+[[ -d $HARBOR_ROOT/.git ]] || git clone --filter=blob:none https://github.com/laude-institute/harbor.git "$HARBOR_ROOT"
+git -C "$HARBOR_ROOT" fetch --depth 1 origin "$HARBOR_COMMIT"
+git -C "$HARBOR_ROOT" -c advice.detachedHead=false checkout --detach "$HARBOR_COMMIT"
+[[ $(git -C "$HARBOR_ROOT" rev-parse HEAD) == "$HARBOR_COMMIT" ]]
+
 echo "=== 2. venv (fsdp + harbor extras) -> $VENV"
 UV_ENV=(sh -c 'for v in $(env | sed -n "s/^\(UV_[A-Z_]*\)=.*/\1/p"); do unset "$v"; done
   unset VIRTUAL_ENV PYTHONPATH; exec env "$@"' sh UV_CACHE_DIR="$UV_CACHE_DIR" UV_PYTHON_INSTALL_DIR="$UV_PYTHON_INSTALL_DIR")
 (cd "$SKYRL_ROOT" && "${IN[@]}" "${UV_ENV[@]}" UV_PROJECT_ENVIRONMENT="$VENV" "$(command -v uv)" \
-  sync --frozen --extra fsdp --extra harbor --no-dev)
-# Modal's api-proxy-support extra: Modal reaches its API through the proxy only with these (not in SkyRL's lock).
-# `uv sync` removes them again, so this runs after every sync.
+  sync --frozen --extra fsdp --extra harbor --no-dev --no-install-package harbor)
+# `uv sync` removes packages it did not install, so both of these run after every sync:
+# Harbor from the host-git clone, and Modal's api-proxy-support extra (python-socks, aiohttp-socks; not in SkyRL's
+# lock), without which Modal cannot use the proxy.
+"${IN[@]}" "${UV_ENV[@]}" "$(command -v uv)" pip install --python "$VENV/bin/python" --no-deps "$HARBOR_ROOT"
 "${IN[@]}" "${UV_ENV[@]}" "$(command -v uv)" pip install --python "$VENV/bin/python" \
   "python-socks[asyncio]>=2.5" "aiohttp-socks>=0.8"
 "${IN[@]}" "$VENV/bin/python" - <<'PY'

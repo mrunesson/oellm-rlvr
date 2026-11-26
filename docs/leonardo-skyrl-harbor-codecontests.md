@@ -42,7 +42,7 @@ shell keystrokes, Harbor runs them in the sandbox and returns the terminal outpu
 | Part | Version | Note |
 |---|---|---|
 | SkyRL | `skyrl-v0.3.0` (`f5bc3b7`), `--extra fsdp --extra harbor` from its `uv.lock` | same commit as the GSM8K run; separate venv `venvs/skyrl-v030-harbor` |
-| Harbor | `3de07a0` (0.13.1) | from SkyRL's lockfile |
+| Harbor | `3de07a0` (0.13.1) | the commit SkyRL's lockfile pins. The vLLM image has no `git`, so the setup job clones it with the host's git into `sources/harbor-3de07a0`, runs `uv sync --no-install-package harbor` (still installs Harbor's dependencies, needs no git), and installs Harbor from the clone with `--no-deps` |
 | Modal client | 1.5.1 + `python-socks`, `aiohttp-socks` | the last two are unpinned (`>=2.5`, `>=0.8`, Modal's own extra) |
 | Weights | `prelude-base@4eafcf9` | `max_position_embeddings` 262144, `rope_theta` 2e7, vocabulary 262,145 rows. Staged to `models/prelude-base-long-reason`; the GSM8K run's `models/prelude-base-reason` (`7ab2bc6`, 4k) is left alone |
 | Tokenizer | `tokenizer-256k-reason@baaafeb` | the model repo's own tokenizer has `<start_of_turn>`/`<end_of_turn>` at ids 3/4, so the template's `<\|im_start\|>`/`<\|im_end\|>` would be split into ordinary text pieces. The reason tokenizer has them at 3/4, with the same merges and max id 262144 (< 262,145 rows); only 16 reserved-slot tokens differ |
